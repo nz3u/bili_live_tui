@@ -10,10 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/andybalholm/brotli"
-	"github.com/google/go-querystring/query"
-	"github.com/shr-go/bili_live_tui/api"
-	"github.com/shr-go/bili_live_tui/pkg/logging"
 	"io"
 	"io/ioutil"
 	"net"
@@ -22,6 +18,11 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/andybalholm/brotli"
+	"github.com/google/go-querystring/query"
+	"github.com/shr-go/bili_live_tui/api"
+	"github.com/shr-go/bili_live_tui/pkg/logging"
 )
 
 var (
@@ -158,7 +159,13 @@ func GetDanmuInfo(client *http.Client, id uint64) (info *api.DanmuInfoResp, err 
 	}
 	baseURL := "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
 	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-	resp, err := client.Get(realUrl)
+
+	signedUrl, err := signAndGenerateURL(realUrl)
+	if err != nil {
+		return
+	}
+
+	resp, err := client.Get(signedUrl)
 	if err != nil {
 		return
 	}

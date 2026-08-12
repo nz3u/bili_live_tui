@@ -13,6 +13,8 @@
 目前配置文件比较简单，只有两个设置选项
 ```toml
 room_id = 7777 # 想登录的直播间ID
+room_ids = [1, 2, 3] # 可选：按顺序切换的直播间ID，快捷键默认为 Ctrl+N
+room_switch_key = "ctrl+n" # 可选：切换快捷键
 chat_buffer = 200 # 可以回滚多少条弹幕
 ```
 

@@ -87,7 +87,11 @@ func (m *loginModel) enterRoom() tea.Msg {
 		os.WriteFile("COOKIE.DAT", []byte(m.cookies), 0o660)
 	}
 
-	if room, err := live_room.AuthAndConnect(m.client, LiveConfig.RoomID); err != nil {
+	roomID := LiveConfig.RoomID
+	if len(LiveConfig.RoomIDs) > 0 {
+		roomID = LiveConfig.RoomIDs[0]
+	}
+	if room, err := live_room.AuthAndConnect(m.client, roomID); err != nil {
 		logging.Fatalf("AuthAndConnect failed, err=%v", err)
 	} else {
 		m.room = room

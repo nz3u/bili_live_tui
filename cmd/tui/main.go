@@ -14,7 +14,9 @@ func main() {
 	if err != nil || room == nil {
 		logging.Fatalf("Connect server error, err=%v", err)
 	}
-	p := tea.NewProgram(tui.InitialModel(room), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	m := tui.InitialModel(room)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	m.SetProgram(p)
 	go tui.ReceiveMsg(p, room)
 	go tui.PoolWindowSize(p)
 	if err := p.Start(); err != nil {

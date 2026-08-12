@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shr-go/bili_live_tui/api"
+	"github.com/shr-go/bili_live_tui/internal/live_room"
 	"github.com/shr-go/bili_live_tui/pkg/logging"
 	"golang.org/x/term"
 )
@@ -53,13 +54,15 @@ type model struct {
 	ready      bool
 	lockBottom bool
 	state      sessionState
+	roomIndex  int
+	program    *tea.Program
 }
 
-func InitialModel(room *api.LiveRoom) model {
+func InitialModel(room *api.LiveRoom) *model {
 	ti := textinput.New()
 	ti.CharLimit = 20
 
-	return model{
+	return &model{
 		danmu:      list.New(),
 		room:       room,
 		viewport:   viewport.Model{},
@@ -67,6 +70,32 @@ func InitialModel(room *api.LiveRoom) model {
 		ready:      false,
 		lockBottom: true,
 		state:      contentView,
+	}
+}
+
+type roomChangedMsg struct {
+	room  *api.LiveRoom
+	index int
+}
+
+func (m *model) SetProgram(p *tea.Program) { m.program = p }
+
+func (m model) switchRoom() tea.Cmd {
+	return func() tea.Msg {
+		if len(LiveConfig.RoomIDs) < 2 {
+			return nil
+		}
+		next := (m.roomIndex + 1) % len(LiveConfig.RoomIDs)
+		if m.room != nil && m.room.StreamConn != nil {
+			close(m.room.DoneChan)
+			_ = m.room.StreamConn.Close()
+		}
+		room, err := live_room.AuthAndConnect(m.room.Client, LiveConfig.RoomIDs[next])
+		if err != nil {
+			logging.Errorf("switch room failed, err=%v", err)
+			return nil
+		}
+		return roomChangedMsg{room: room, index: next}
 	}
 }
 
@@ -109,6 +138,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		key := LiveConfig.RoomSwitchKey
+		if key == "" {
+			key = "ctrl+n"
+		}
+		if msg.String() == key && m.state == contentView {
+			cmds = append(cmds, m.switchRoom())
+			break
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -158,6 +195,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ready {
 			m.viewport.SetContent(m.renderDanmu())
 		}
+	case roomChangedMsg:
+		m.room = msg.room
+		m.roomIndex = msg.index
+		m.danmu.Init()
+		if m.program != nil {
+			go ReceiveMsg(m.program, m.room)
+		}
+		if m.ready {
+			m.viewport.SetContent(m.renderDanmu())
+		}
 	}
 
 	if m.lockBottom {
@@ -200,18 +247,23 @@ func (m model) View() string {
 }
 
 func ReceiveMsg(program *tea.Program, room *api.LiveRoom) {
-	for msg := range room.MessageChan {
-		switch msg.Cmd {
-		case "DANMU_MSG": // 普通弹幕消息
-			if danmu := processDanmuMsg(msg); danmu != nil {
-				program.Send(danmu)
+	for {
+		select {
+		case <-room.DoneChan:
+			return
+		case msg := <-room.MessageChan:
+			switch msg.Cmd {
+			case "DANMU_MSG": // 普通弹幕消息
+				if danmu := processDanmuMsg(msg); danmu != nil {
+					program.Send(danmu)
+				}
+			case "INTERACT_WORD": // 普通进场消息
+
+			case "ENTRY_EFFECT": // 特效进场消息 和上面的普通进场消息存在其一
+
+			case "PREPARING": // 直播结束，这里断一下日志
+				logging.Rotate()
 			}
-		case "INTERACT_WORD": // 普通进场消息
-
-		case "ENTRY_EFFECT": // 特效进场消息 和上面的普通进场消息存在其一
-
-		case "PREPARING": // 直播结束，这里断一下日志
-			logging.Rotate()
 		}
 	}
 }

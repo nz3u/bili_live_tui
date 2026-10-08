@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"sync"
 )
 
 type LiveRoom struct {
@@ -13,14 +14,20 @@ type LiveRoom struct {
 	MessageChan  chan *DanmuMessage
 	ReqChan      chan []byte
 	DoneChan     chan struct{}
-	RetryChan    chan struct{}
-	StreamConn   net.Conn
+	StreamConn   net.Conn // Initial connection only; reconnects are owned by the supervisor.
 	Title        string
 	ShortID      uint64
 	OwnerId      uint64
 	RoomUserInfo *UserRoomProperty
 	Client       *http.Client
 	CSRF         string
+	closeOnce    sync.Once
+}
+
+// Close ends the room session, not just a single TCP connection. DoneChan stays
+// unchanged across reconnects so UI receivers and room heartbeats keep running.
+func (room *LiveRoom) Close() {
+	room.closeOnce.Do(func() { close(room.DoneChan) })
 }
 
 type DanmuInfoReq struct {

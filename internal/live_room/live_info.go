@@ -1,6 +1,7 @@
 package live_room
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,11 @@ import (
 	"net/http"
 )
 
-func GetRoomInfo(client *http.Client, roomID uint64) (info *api.RoomInfoResp, err error) {
+func GetRoomInfo(client *http.Client, roomID uint64) (*api.RoomInfoResp, error) {
+	return getRoomInfo(context.Background(), client, roomID)
+}
+
+func getRoomInfo(ctx context.Context, client *http.Client, roomID uint64) (info *api.RoomInfoResp, err error) {
 	roomInfoReq := api.RoomInfoReq{RoomID: roomID}
 	v, err := query.Values(roomInfoReq)
 	if err != nil {
@@ -18,7 +23,11 @@ func GetRoomInfo(client *http.Client, roomID uint64) (info *api.RoomInfoResp, er
 	}
 	baseURL := "https://api.live.bilibili.com/room/v1/Room/get_info"
 	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-	resp, err := client.Get(realUrl)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return
 	}
@@ -40,7 +49,11 @@ func GetRoomInfo(client *http.Client, roomID uint64) (info *api.RoomInfoResp, er
 }
 
 //GetUserRoomInfo this function trigger user enter room event
-func GetUserRoomInfo(client *http.Client, roomID uint64) (info *api.UserRoomInfo, err error) {
+func GetUserRoomInfo(client *http.Client, roomID uint64) (*api.UserRoomInfo, error) {
+	return getUserRoomInfo(context.Background(), client, roomID)
+}
+
+func getUserRoomInfo(ctx context.Context, client *http.Client, roomID uint64) (info *api.UserRoomInfo, err error) {
 	roomInfoReq := api.RoomInfoReq{RoomID: roomID}
 	v, err := query.Values(roomInfoReq)
 	if err != nil {
@@ -48,7 +61,11 @@ func GetUserRoomInfo(client *http.Client, roomID uint64) (info *api.UserRoomInfo
 	}
 	baseURL := "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByUser"
 	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-	resp, err := client.Get(realUrl)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return
 	}

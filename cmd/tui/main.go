@@ -8,18 +8,24 @@ import (
 )
 
 func main() {
+	if err := tui.LoadConfig("config.toml"); err != nil {
+		logging.Fatalf("load config error, err=%v", err)
+	}
+	defer logging.Cleanup()
 	logging.Infof("tui start")
 	client := tui.GetCustomHttpClient()
 	room, err := tui.PrepareEnterRoom(client)
 	if err != nil || room == nil {
 		logging.Fatalf("Connect server error, err=%v", err)
 	}
+	defer room.Close()
 	m := tui.InitialModel(room)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	m.SetProgram(p)
-	go tui.ReceiveMsg(p, room)
-	go tui.PoolWindowSize(p)
-	if err := p.Start(); err != nil {
+	finalModel, err := p.StartReturningModel()
+	if closer, ok := finalModel.(interface{ Close() }); ok {
+		closer.Close()
+	}
+	if err != nil {
 		logging.Fatalf("Alas, there's been an error: %v", err)
 		os.Exit(1)
 	}

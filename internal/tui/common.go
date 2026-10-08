@@ -9,6 +9,7 @@ import (
 	"golang.org/x/term"
 	"net/http"
 	"os"
+	"time"
 )
 
 var (
@@ -20,11 +21,13 @@ var (
 func init() {
 	logging.InitLogConfig()
 	windowWidth, windowHeight, _ = term.GetSize(int(os.Stdout.Fd()))
-	f := "config.toml"
-	_, err := toml.DecodeFile(f, &LiveConfig)
-	if err != nil {
-		logging.Fatalf("load config error, err=%v", err)
-	}
+}
+
+// LoadConfig is explicit so importing the UI does not require a config file
+// in the working directory (including during offline regression tests).
+func LoadConfig(path string) error {
+	_, err := toml.DecodeFile(path, &LiveConfig)
+	return err
 }
 
 type userAgentTransport struct {
@@ -48,6 +51,7 @@ func GetCustomHttpClient() (client *http.Client) {
 	}
 	return &http.Client{
 		Transport: transport,
+		Timeout:   15 * time.Second,
 	}
 }
 

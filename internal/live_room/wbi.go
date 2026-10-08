@@ -2,6 +2,7 @@ package live_room
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -11,39 +12,65 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 func signAndGenerateURL(urlStr string) (string, error) {
+	return signURLContext(context.Background(), http.DefaultClient, urlStr)
+}
+
+func signURLContext(ctx context.Context, client *http.Client, urlStr string) (string, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return "", err
 	}
-	err = Sign(u)
+	keys, err := getWBIKeys(ctx, client, false)
 	if err != nil {
 		return "", fmt.Errorf("sign error: %w", err)
 	}
+	keys.signURL(u)
 	return u.String(), nil
 }
 
 // Sign 为链接签名
 func Sign(u *url.URL) error {
-	return wbiKeys.Sign(u)
+	keys, err := Get()
+	if err != nil {
+		return err
+	}
+	keys.signURL(u)
+	return nil
 }
 
 // Update 无视过期时间更新
 func Update() error {
-	return wbiKeys.Update()
+	_, err := getWBIKeys(context.Background(), http.DefaultClient, true)
+	return err
 }
 
-func Get() (wk WbiKeys, err error) {
-	if err = wk.update(false); err != nil {
+func Get() (WbiKeys, error) {
+	return getWBIKeys(context.Background(), http.DefaultClient, false)
+}
+
+func getWBIKeys(ctx context.Context, client *http.Client, purge bool) (WbiKeys, error) {
+	wbiKeysMu.Lock()
+	keys := wbiKeys
+	wbiKeysMu.Unlock()
+	// Never hold the shared cache lock during a cancellable network request.
+	if err := keys.updateContext(ctx, client, purge); err != nil {
 		return WbiKeys{}, err
 	}
-	return wbiKeys, nil
+	wbiKeysMu.Lock()
+	if keys.lastUpdateTime.After(wbiKeys.lastUpdateTime) {
+		wbiKeys = keys
+	}
+	wbiKeysMu.Unlock()
+	return keys, nil
 }
 
 var wbiKeys WbiKeys
+var wbiKeysMu sync.Mutex
 
 type WbiKeys struct {
 	Img            string
@@ -58,6 +85,11 @@ func (wk *WbiKeys) Sign(u *url.URL) (err error) {
 		return err
 	}
 
+	wk.signURL(u)
+	return nil
+}
+
+func (wk *WbiKeys) signURL(u *url.URL) {
 	values := u.Query()
 
 	values = removeUnwantedChars(values, '!', '\'', '(', ')', '*') // 必要性存疑?
@@ -69,7 +101,6 @@ func (wk *WbiKeys) Sign(u *url.URL) (err error) {
 	hash := md5.Sum([]byte(values.Encode() + wk.Mixin)) // Calculate w_rid
 	values.Set("w_rid", hex.EncodeToString(hash[:]))
 	u.RawQuery = values.Encode()
-	return nil
 }
 
 // Update 无视过期时间更新
@@ -79,12 +110,23 @@ func (wk *WbiKeys) Update() (err error) {
 
 // update 按需更新
 func (wk *WbiKeys) update(purge bool) error {
+	return wk.updateContext(context.Background(), http.DefaultClient, purge)
+}
+
+func (wk *WbiKeys) updateContext(ctx context.Context, client *http.Client, purge bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !purge && time.Since(wk.lastUpdateTime) < time.Hour {
 		return nil
 	}
-
-	// 测试下来不用修改 header 也能过
-	resp, err := http.Get("https://api.bilibili.com/x/web-interface/nav")
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.bilibili.com/x/web-interface/nav", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -118,11 +160,15 @@ func (wk *WbiKeys) update(purge bool) error {
 	subPng := subParts[len(subParts)-1]
 
 	// 7cd084941338484aae1ad9425b84077c
-	wbiKeys.Img = strings.TrimSuffix(imgPng, ".png")
-	wbiKeys.Sub = strings.TrimSuffix(subPng, ".png")
-
-	wbiKeys.mixin()
-	wbiKeys.lastUpdateTime = time.Now()
+	imgKey := strings.TrimSuffix(imgPng, ".png")
+	subKey := strings.TrimSuffix(subPng, ".png")
+	if len(imgKey) != 32 || len(subKey) != 32 {
+		return fmt.Errorf("invalid WBI key lengths")
+	}
+	wk.Img = imgKey
+	wk.Sub = subKey
+	wk.mixin()
+	wk.lastUpdateTime = time.Now()
 	return nil
 }
 

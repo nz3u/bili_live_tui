@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,29 +30,31 @@ func processDanmuMsg(msg *api.DanmuMessage) (danmu *danmuMsg) {
 		medal.name = rawMedalInfo[1].(string)
 		medal.medalColor = fmt.Sprintf("#%06X", int64(rawMedalInfo[4].(float64)))
 	}
+	nameColor := ""
+	if len(rawUserInfo) > 7 {
+		nameColor, _ = rawUserInfo[7].(string)
+	}
 	danmu = &danmuMsg{
 		uid:          uint64(rawUserInfo[0].(float64)),
 		uName:        rawUserInfo[1].(string),
 		chatTime:     time.UnixMilli(int64(rawBasicInfo[4].(float64))),
 		content:      content,
 		medal:        medal,
-		nameColor:    rawUserInfo[7].(string),
+		nameColor:    nameColor,
 		contentColor: fmt.Sprintf("#%06X", int64(rawBasicInfo[3].(float64))),
 	}
 	return
 }
 
-func generateFakeDanmuMsg(content string) (danmu *danmuMsg) {
-	danmu = &danmuMsg{
-		uid:          10000,
-		uName:        "【未登录 这是一条假弹幕】",
-		chatTime:     time.Now(),
-		content:      content,
-		medal:        nil,
-		nameColor:    "#DC143C",
-		contentColor: "#DC143C",
+func isDanmuCommand(cmd string) bool {
+	return strings.SplitN(cmd, ":", 2)[0] == "DANMU_MSG"
+}
+
+func danmuLength(room *api.LiveRoom) int {
+	if room.RoomUserInfo != nil && room.RoomUserInfo.Danmu.Length > 0 {
+		return room.RoomUserInfo.Danmu.Length
 	}
-	return danmu
+	return 20
 }
 
 func generateDanmuMsg(content string, room *api.LiveRoom) (danmu *api.SendMsgReq) {

@@ -1,6 +1,7 @@
 package live_room
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,18 +86,18 @@ func PollLogin(client *http.Client, data *api.QRCodeLoginData) (cookie string, e
 }
 
 func parseCookieStr(client *http.Client, cookies string) {
-	defer func() {
-		recover()
-	}()
 	jar, _ := cookiejar.New(nil)
 	elements := strings.Split(cookies, ";")
 	var cookieSlice []*http.Cookie
 	for _, element := range elements {
 		element := strings.TrimSpace(element)
-		nameValue := strings.Split(element, "=")
+		name, value, ok := strings.Cut(element, "=")
+		if !ok || name == "" {
+			continue
+		}
 		cookie := &http.Cookie{
-			Name:   nameValue[0],
-			Value:  nameValue[1],
+			Name:   name,
+			Value:  value,
 			Path:   "/",
 			Domain: ".bilibili.com",
 		}
@@ -131,29 +132,60 @@ func CheckAuth(client *http.Client) bool {
 	if err = json.Unmarshal(respBody, &data); err != nil {
 		return false
 	}
-	return data["code"].(float64) == 0
+	code, ok := data["code"].(float64)
+	return ok && code == 0
 }
 
 func GetUserInfo(client *http.Client) *api.UserInfo {
-	baseURL := "https://api.bilibili.com/x/web-interface/nav"
-	resp, err := client.Get(baseURL)
+	info, _ := getUserInfo(client)
+	return info
+}
+
+func getUserInfo(client *http.Client) (*api.UserInfo, error) {
+	return getUserInfoContext(context.Background(), client)
+}
+
+func getUserInfoContext(ctx context.Context, client *http.Client) (*api.UserInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.bilibili.com/x/web-interface/nav", nil)
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("获取登录状态失败: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := ioutil.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取登录状态 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var userInfo api.UserInfo
-	if err = json.Unmarshal(respBody, &userInfo); err != nil || userInfo.Code != 0 {
-		return nil
+	var status struct {
+		Code *int `json:"code"`
 	}
-	return &userInfo
+	var info api.UserInfo
+	if err := json.Unmarshal(body, &status); err != nil || status.Code == nil {
+		return nil, errors.New("登录状态接口返回无效结果")
+	}
+	if *status.Code == -101 {
+		return nil, nil // Only a definite 'not logged in' response is a guest.
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+	if info.Code != 0 || info.Data.Mid == 0 {
+		return nil, fmt.Errorf("获取登录状态失败 (%d): %s", info.Code, info.Message)
+	}
+	return &info, nil
 }
 
 func getCSRF(client *http.Client) string {
-	u, _ := url.Parse("https://bilibili.com")
+	if client == nil || client.Jar == nil {
+		return ""
+	}
+	u, _ := url.Parse("https://api.live.bilibili.com")
 	cookies := client.Jar.Cookies(u)
 	for _, cookie := range cookies {
 		if cookie.Name == "bili_jct" {

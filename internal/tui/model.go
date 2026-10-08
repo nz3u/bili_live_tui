@@ -2,9 +2,8 @@ package tui
 
 import (
 	"container/list"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"runtime"
 	"strings"
@@ -51,16 +50,19 @@ type model struct {
 	room       *api.LiveRoom
 	viewport   viewport.Model
 	textInput  textinput.Model
+	windowSize tea.WindowSizeMsg
 	ready      bool
 	lockBottom bool
 	state      sessionState
 	roomIndex  int
-	program    *tea.Program
+	switching  bool
+	sending    bool
+	sendStatus string
 }
 
 func InitialModel(room *api.LiveRoom) *model {
 	ti := textinput.New()
-	ti.CharLimit = 20
+	ti.CharLimit = danmuLength(room)
 
 	return &model{
 		danmu:      list.New(),
@@ -74,61 +76,61 @@ func InitialModel(room *api.LiveRoom) *model {
 }
 
 type roomChangedMsg struct {
-	room  *api.LiveRoom
-	index int
+	source  *api.LiveRoom
+	room    *api.LiveRoom
+	index   int
+	err     error
+	claimed chan struct{}
 }
 
-func (m *model) SetProgram(p *tea.Program) { m.program = p }
+func (m model) Close() { m.room.Close() }
 
 func (m model) switchRoom() tea.Cmd {
 	return func() tea.Msg {
 		if len(LiveConfig.RoomIDs) < 2 {
 			return nil
 		}
-		next := (m.roomIndex + 1) % len(LiveConfig.RoomIDs)
-		if m.room != nil && m.room.StreamConn != nil {
-			close(m.room.DoneChan)
-			_ = m.room.StreamConn.Close()
+		select {
+		case <-m.room.DoneChan:
+			return nil
+		default:
 		}
-		room, err := live_room.AuthAndConnect(m.room.Client, LiveConfig.RoomIDs[next])
+		next := (m.roomIndex + 1) % len(LiveConfig.RoomIDs)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-m.room.DoneChan:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		room, err := live_room.AuthAndConnectContext(ctx, m.room.Client, LiveConfig.RoomIDs[next])
 		if err != nil {
 			logging.Errorf("switch room failed, err=%v", err)
-			return nil
+			return roomChangedMsg{source: m.room, err: err}
 		}
-		return roomChangedMsg{room: room, index: next}
+		claimed := make(chan struct{})
+		// Commands may finish after Bubble Tea exits and discards their result.
+		// Until Update claims this room, the old session owns its cleanup.
+		go closeUnclaimedRoom(m.room.DoneChan, claimed, room)
+		return roomChangedMsg{source: m.room, room: room, index: next, claimed: claimed}
 	}
 }
 
 func (m model) sendDanmu(needSend string) tea.Cmd {
-	if m.room.RoomUserInfo == nil {
-		danmu := generateFakeDanmuMsg(needSend)
-		return func() tea.Msg {
-			return danmu
+	room := m.room
+	return func() tea.Msg {
+		reply, err := postDanmu(room, needSend)
+		if err != nil {
+			logging.Errorf("Send Danmu failed, err=%v", err)
 		}
-	} else {
-		danmu := generateDanmuMsg(needSend, m.room)
-		return func() tea.Msg {
-			contentType, form := packDanmuMsgForm(danmu)
-			baseURL := "https://api.live.bilibili.com/msg/send"
-			resp, err := m.room.Client.Post(baseURL, contentType, form)
-			if err != nil {
-				logging.Errorf("Send Danmu failed, err=%v", err)
-				return nil
-			}
-			defer resp.Body.Close()
-			respBody, err := ioutil.ReadAll(resp.Body)
-			var data map[string]interface{}
-			if err = json.Unmarshal(respBody, &data); err != nil || data["code"].(float64) != 0 {
-				logging.Errorf("Send Danmu failed, err=%v, data=%v", err, data)
-				return nil
-			}
-			return nil
-		}
+		return sendResultMsg{room: room, content: needSend, reply: reply, err: err}
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(waitForDanmu(m.room), waitForWindowResize(m.room, m.windowSize))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -143,11 +145,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			key = "ctrl+n"
 		}
 		if msg.String() == key && m.state == contentView {
-			cmds = append(cmds, m.switchRoom())
+			if !m.switching && len(LiveConfig.RoomIDs) >= 2 {
+				m.switching = true
+				cmds = append(cmds, m.switchRoom())
+			}
 			break
 		}
 		switch msg.String() {
 		case "ctrl+c":
+			m.room.Close()
 			return m, tea.Quit
 		case "tab":
 			if m.state == contentView {
@@ -159,16 +165,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Blur()
 			}
 		case "enter":
-			if m.state == inputView {
+			if m.state == inputView && !m.sending {
 				needSend := m.textInput.Value()
-				m.textInput.Reset()
 				if len(needSend) > 0 {
+					m.sending = true
+					m.sendStatus = "正在发送…"
 					cmd = m.sendDanmu(needSend)
 					cmds = append(cmds, cmd)
 				}
 			}
 		}
+	case windowSizePollMsg:
+		if msg.room != m.room {
+			break
+		}
+		m.windowSize = msg.size
+		updated, cmd := m.Update(msg.size)
+		return updated, tea.Batch(cmd, waitForWindowResize(m.room, m.windowSize))
 	case tea.WindowSizeMsg:
+		m.windowSize = msg
 		headerHeight := lipgloss.Height(m.headerView()) + focusMarginHeight
 		footerHeight := lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 3*focusMarginHeight
 		verticalMarginHeight := headerHeight + footerHeight
@@ -187,21 +202,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		textWieth := msg.Width - verticalMarginWidth - 3
 		m.textInput.Placeholder = lipgloss.NewStyle().Width(textWieth).Render("Press Enter to Send")
 		m.textInput.Width = textWieth
-	case *danmuMsg:
-		m.danmu.PushBack(msg)
+	case receivedDanmuMsg:
+		if msg.room != m.room {
+			break
+		}
+		cmds = append(cmds, waitForDanmu(m.room))
+		m.danmu.PushBack(msg.danmu)
 		for m.danmu.Len() > LiveConfig.ChatBuffer {
 			m.danmu.Remove(m.danmu.Front())
 		}
 		if m.ready {
 			m.viewport.SetContent(m.renderDanmu())
 		}
+	case sendResultMsg:
+		if msg.room != m.room {
+			break // A late reply from the previous room must not alter this draft.
+		}
+		m.sending = false
+		if msg.err != nil {
+			m.sendStatus = msg.err.Error()
+		} else if msg.reply != "" {
+			// Some API responses have code=0 but still carry a filtering hint.
+			// Display it and retain the draft instead of claiming delivery.
+			m.sendStatus = "发送接口回复: " + msg.reply
+			logging.Warnf("send danmu API reply: %s", msg.reply)
+		} else {
+			m.sendStatus = "发送请求已接受"
+			if m.textInput.Value() == msg.content {
+				m.textInput.Reset()
+			}
+		}
 	case roomChangedMsg:
+		closed := false
+		select {
+		case <-m.room.DoneChan:
+			closed = true
+		default:
+		}
+		if msg.source != m.room || closed {
+			if msg.claimed != nil {
+				close(msg.claimed)
+			}
+			if msg.room != nil {
+				msg.room.Close()
+			}
+			break
+		}
+		m.switching = false
+		if msg.err != nil {
+			m.sendStatus = "切换失败: " + msg.err.Error()
+			break
+		}
+		close(msg.claimed)
+		m.room.Close()
 		m.room = msg.room
+		m.sending = false
+		m.sendStatus = ""
+		m.textInput.CharLimit = danmuLength(msg.room)
 		m.roomIndex = msg.index
 		m.danmu.Init()
-		if m.program != nil {
-			go ReceiveMsg(m.program, m.room)
-		}
+		cmds = append(cmds, waitForDanmu(m.room), waitForWindowResize(m.room, m.windowSize))
 		if m.ready {
 			m.viewport.SetContent(m.renderDanmu())
 		}
@@ -246,43 +306,70 @@ func (m model) View() string {
 	return s
 }
 
-func ReceiveMsg(program *tea.Program, room *api.LiveRoom) {
-	for {
-		select {
-		case <-room.DoneChan:
-			return
-		case msg := <-room.MessageChan:
-			switch msg.Cmd {
-			case "DANMU_MSG": // 普通弹幕消息
-				if danmu := processDanmuMsg(msg); danmu != nil {
-					program.Send(danmu)
+type receivedDanmuMsg struct {
+	room  *api.LiveRoom
+	danmu *danmuMsg
+}
+
+// Subscribe through a Bubble Tea command instead of calling Program.Send from
+// a goroutine: this version of Bubble Tea can block Send forever during exit.
+func waitForDanmu(room *api.LiveRoom) tea.Cmd {
+	return func() tea.Msg {
+		for {
+			select {
+			case <-room.DoneChan:
+				return nil
+			case msg := <-room.MessageChan:
+				if msg == nil {
+					return nil
 				}
-			case "INTERACT_WORD": // 普通进场消息
-
-			case "ENTRY_EFFECT": // 特效进场消息 和上面的普通进场消息存在其一
-
-			case "PREPARING": // 直播结束，这里断一下日志
-				logging.Rotate()
+				if isDanmuCommand(msg.Cmd) {
+					if danmu := processDanmuMsg(msg); danmu != nil {
+						return receivedDanmuMsg{room: room, danmu: danmu}
+					}
+				} else if msg.Cmd == "PREPARING" {
+					logging.Rotate()
+				}
 			}
 		}
 	}
 }
 
-func PoolWindowSize(program *tea.Program) {
-	if runtime.GOOS != "windows" {
-		return
+func closeUnclaimedRoom(sourceDone, claimed <-chan struct{}, room *api.LiveRoom) {
+	select {
+	case <-claimed:
+	case <-sourceDone:
+		select {
+		case <-claimed:
+		default:
+			room.Close()
+		}
 	}
-	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
-	for range time.Tick(20 * time.Millisecond) {
-		nowWidth, nowHeight, _ := term.GetSize(int(os.Stdout.Fd()))
-		if width != nowWidth || height != nowHeight {
-			width = nowWidth
-			height = nowHeight
-			windowSize := tea.WindowSizeMsg{
-				Width:  width,
-				Height: height,
+}
+
+type windowSizePollMsg struct {
+	room *api.LiveRoom
+	size tea.WindowSizeMsg
+}
+
+func waitForWindowResize(room *api.LiveRoom, previous tea.WindowSizeMsg) tea.Cmd {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return func() tea.Msg {
+		width, height := previous.Width, previous.Height
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-room.DoneChan:
+				return nil
+			case <-ticker.C:
+				nowWidth, nowHeight, err := term.GetSize(int(os.Stdout.Fd()))
+				if err == nil && (width != nowWidth || height != nowHeight) {
+					return windowSizePollMsg{room: room, size: tea.WindowSizeMsg{Width: nowWidth, Height: nowHeight}}
+				}
 			}
-			program.Send(windowSize)
 		}
 	}
 }
@@ -305,7 +392,7 @@ func (m model) headerView() string {
 		if LiveConfig.ShowRoomNumber {
 			header = fmt.Sprintf("%s - %d", m.room.Title, roomID)
 		} else {
-			header = fmt.Sprintf(m.room.Title)
+			header = m.room.Title
 		}
 	} else {
 		if LiveConfig.ShowRoomNumber {
@@ -321,8 +408,9 @@ func (m model) headerView() string {
 
 func (m model) footerView() string {
 	info := lipgloss.NewStyle().Render(fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100))
-	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(info)))
-	return lipgloss.JoinHorizontal(lipgloss.Center, line, info)
+	status := lipgloss.NewStyle().MaxWidth(max(0, m.viewport.Width-lipgloss.Width(info))).Render(strings.Join(strings.Fields(m.sendStatus), " "))
+	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(info)-lipgloss.Width(status)))
+	return lipgloss.JoinHorizontal(lipgloss.Center, status, line, info)
 }
 
 func (m model) renderDanmu() string {

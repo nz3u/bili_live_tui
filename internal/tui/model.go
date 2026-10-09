@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -46,18 +47,20 @@ type danmuMsg struct {
 }
 
 type model struct {
-	danmu      *list.List
-	room       *api.LiveRoom
-	viewport   viewport.Model
-	textInput  textinput.Model
-	windowSize tea.WindowSizeMsg
-	ready      bool
-	lockBottom bool
-	state      sessionState
-	roomIndex  int
-	switching  bool
-	sending    bool
-	sendStatus string
+	danmu         *list.List
+	room          *api.LiveRoom
+	viewport      viewport.Model
+	textInput     textinput.Model
+	windowSize    tea.WindowSizeMsg
+	pendingResize *tea.WindowSizeMsg
+	terminalSize  *terminalSizeState
+	ready         bool
+	lockBottom    bool
+	state         sessionState
+	roomIndex     int
+	switching     bool
+	sending       bool
+	sendStatus    string
 }
 
 func InitialModel(room *api.LiveRoom) *model {
@@ -65,13 +68,14 @@ func InitialModel(room *api.LiveRoom) *model {
 	ti.CharLimit = danmuLength(room)
 
 	return &model{
-		danmu:      list.New(),
-		room:       room,
-		viewport:   viewport.Model{},
-		textInput:  ti,
-		ready:      false,
-		lockBottom: true,
-		state:      contentView,
+		danmu:        list.New(),
+		terminalSize: &terminalSizeState{},
+		room:         room,
+		viewport:     viewport.Model{},
+		textInput:    ti,
+		ready:        false,
+		lockBottom:   true,
+		state:        contentView,
 	}
 }
 
@@ -130,7 +134,7 @@ func (m model) sendDanmu(needSend string) tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(waitForDanmu(m.room), waitForWindowResize(m.room, m.windowSize))
+	return tea.Batch(waitForDanmu(m.room), waitForWindowResize(m.room, m.terminalSize))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -179,29 +183,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.room != m.room {
 			break
 		}
-		m.windowSize = msg.size
-		updated, cmd := m.Update(msg.size)
-		return updated, tea.Batch(cmd, waitForWindowResize(m.room, m.windowSize))
+		// The renderer handles WindowSizeMsg before calling model.Update.
+		// Recursively updating only the model leaves its clipping width stale.
+		m.pendingResize = &msg.size
+		return m, func() tea.Msg {
+			select {
+			case <-msg.room.DoneChan:
+				return nil
+			default:
+				return msg.size
+			}
+		}
 	case tea.WindowSizeMsg:
+		// This is also the renderer's size, even if a delayed event arrived.
+		// The active poll observes it and repairs any stale/invalid resize.
+		m.terminalSize.store(msg)
+		if msg.Width <= 0 || msg.Height <= 0 {
+			break
+		}
 		m.windowSize = msg
+		if m.pendingResize != nil && *m.pendingResize == msg {
+			m.pendingResize = nil
+			// Start the next poll only after this native event has been handled.
+			// Otherwise rapid resizes can race the forwarded event.
+			cmds = append(cmds, waitForWindowResize(m.room, m.terminalSize))
+		}
+		verticalMarginWidth := 2 * focusMarginWidth
+		viewportWidth := max(1, msg.Width-verticalMarginWidth)
+		textWidth := max(1, msg.Width-verticalMarginWidth-3)
+		m.viewport.Width = viewportWidth
+		m.textInput.Placeholder = lipgloss.NewStyle().Width(textWidth).Render("Press Enter to Send")
+		m.textInput.Width = textWidth
 		headerHeight := lipgloss.Height(m.headerView()) + focusMarginHeight
 		footerHeight := lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 3*focusMarginHeight
-		verticalMarginHeight := headerHeight + footerHeight
-		verticalMarginWidth := 2 * focusMarginWidth
+		viewportHeight := max(1, msg.Height-headerHeight-footerHeight)
 
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width-verticalMarginWidth, msg.Height-verticalMarginHeight)
-			m.viewport.YPosition = headerHeight
+			m.viewport = viewport.New(viewportWidth, viewportHeight)
 			m.viewport.HighPerformanceRendering = false
-			m.viewport.SetContent(m.renderDanmu())
 			m.ready = true
 		} else {
-			m.viewport.Width = msg.Width - verticalMarginWidth
-			m.viewport.Height = msg.Height - verticalMarginHeight
+			m.viewport.Width = viewportWidth
+			m.viewport.Height = viewportHeight
 		}
-		textWieth := msg.Width - verticalMarginWidth - 3
-		m.textInput.Placeholder = lipgloss.NewStyle().Width(textWieth).Render("Press Enter to Send")
-		m.textInput.Width = textWieth
+		m.viewport.YPosition = headerHeight
+		// Padding depends on viewport height; resizing must redraw existing
+		// messages immediately, even when the room is currently quiet.
+		m.viewport.SetContent(m.renderDanmu())
+		m.viewport.SetYOffset(m.viewport.YOffset)
 	case receivedDanmuMsg:
 		if msg.room != m.room {
 			break
@@ -256,12 +285,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		close(msg.claimed)
 		m.room.Close()
 		m.room = msg.room
+		m.pendingResize = nil
 		m.sending = false
 		m.sendStatus = ""
 		m.textInput.CharLimit = danmuLength(msg.room)
 		m.roomIndex = msg.index
 		m.danmu.Init()
-		cmds = append(cmds, waitForDanmu(m.room), waitForWindowResize(m.room, m.windowSize))
+		cmds = append(cmds, waitForDanmu(m.room), waitForWindowResize(m.room, m.terminalSize))
 		if m.ready {
 			m.viewport.SetContent(m.renderDanmu())
 		}
@@ -294,6 +324,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if !m.ready {
 		return "\nInitializing..."
+	}
+	minimumHeight := lipgloss.Height(m.headerView()) + lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 4*focusMarginHeight + 1
+	if m.windowSize.Width < 6 || m.windowSize.Height < minimumHeight {
+		return lipgloss.NewStyle().MaxWidth(max(1, m.windowSize.Width)).MaxHeight(1).Render("Resize terminal")
 	}
 	var s string
 	contentStr := fmt.Sprintf("%s\n%s\n%s", m.headerView(), m.viewport.View(), m.footerView())
@@ -352,23 +386,42 @@ type windowSizePollMsg struct {
 	size tea.WindowSizeMsg
 }
 
-func waitForWindowResize(room *api.LiveRoom, previous tea.WindowSizeMsg) tea.Cmd {
+// Shared by the model and its active poll so a delayed native resize cannot
+// leave the renderer at a stale size while the poll waits on an old snapshot.
+type terminalSizeState struct{ size atomic.Uint64 }
+
+func (s *terminalSizeState) store(size tea.WindowSizeMsg) {
+	s.size.Store(uint64(uint32(size.Width))<<32 | uint64(uint32(size.Height)))
+}
+
+func (s *terminalSizeState) load() tea.WindowSizeMsg {
+	size := s.size.Load()
+	return tea.WindowSizeMsg{Width: int(uint32(size >> 32)), Height: int(uint32(size))}
+}
+
+func waitForWindowResize(room *api.LiveRoom, size *terminalSizeState) tea.Cmd {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
 	return func() tea.Msg {
-		width, height := previous.Width, previous.Height
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-room.DoneChan:
-				return nil
-			case <-ticker.C:
-				nowWidth, nowHeight, err := term.GetSize(int(os.Stdout.Fd()))
-				if err == nil && (width != nowWidth || height != nowHeight) {
-					return windowSizePollMsg{room: room, size: tea.WindowSizeMsg{Width: nowWidth, Height: nowHeight}}
-				}
+		return pollWindowResize(room, size.load, ticker.C, func() (int, int, error) {
+			return term.GetSize(int(os.Stdout.Fd()))
+		})
+	}
+}
+
+func pollWindowResize(room *api.LiveRoom, lastSize func() tea.WindowSizeMsg, ticks <-chan time.Time, readSize func() (int, int, error)) tea.Msg {
+	for {
+		select {
+		case <-room.DoneChan:
+			return nil
+		case <-ticks:
+			width, height, err := readSize()
+			previous := lastSize()
+			if err == nil && width > 0 && height > 0 && (width != previous.Width || height != previous.Height) {
+				return windowSizePollMsg{room: room, size: tea.WindowSizeMsg{Width: width, Height: height}}
 			}
 		}
 	}
@@ -401,14 +454,17 @@ func (m model) headerView() string {
 	}
 
 	title := lipgloss.NewStyle().BorderStyle(b).Padding(0, 1).
-		Render(header)
+		MaxWidth(max(1, m.viewport.Width)).Render(header)
 	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(title)))
 	return lipgloss.JoinHorizontal(lipgloss.Center, title, line)
 }
 
 func (m model) footerView() string {
 	info := lipgloss.NewStyle().Render(fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100))
-	status := lipgloss.NewStyle().MaxWidth(max(0, m.viewport.Width-lipgloss.Width(info))).Render(strings.Join(strings.Fields(m.sendStatus), " "))
+	status := ""
+	if available := m.viewport.Width - lipgloss.Width(info); available > 0 {
+		status = lipgloss.NewStyle().MaxWidth(available).Render(strings.Join(strings.Fields(m.sendStatus), " "))
+	}
 	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(info)-lipgloss.Width(status)))
 	return lipgloss.JoinHorizontal(lipgloss.Center, status, line, info)
 }

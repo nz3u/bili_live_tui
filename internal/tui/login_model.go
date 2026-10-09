@@ -88,7 +88,7 @@ func (m *loginModel) enterRoom() tea.Msg {
 	}
 
 	roomID := LiveConfig.RoomID
-	if len(LiveConfig.RoomIDs) > 0 {
+	if roomID == 0 && len(LiveConfig.RoomIDs) > 0 {
 		roomID = LiveConfig.RoomIDs[0]
 	}
 	if room, err := live_room.AuthAndConnect(m.client, roomID); err != nil {

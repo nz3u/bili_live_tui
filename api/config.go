@@ -4,6 +4,7 @@ type BiliLiveConfig struct {
 	RoomID         uint64   `toml:"room_id"`
 	RoomIDs        []uint64 `toml:"room_ids"`
 	RoomSwitchKey  string   `toml:"room_switch_key"`
+	SettingsKey    string   `toml:"settings_key"`
 	ChatBuffer     int      `toml:"chat_buffer"`
 	ShowShipLevel  bool     `toml:"show_ship_level"`
 	ShowMedalName  bool     `toml:"show_medal_name"`

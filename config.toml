@@ -1,7 +1,9 @@
 room_id = 7777
-# 多直播间按顺序切换；配置后 room_id 可省略（保留用于兼容旧配置）
-# room_ids = [1, 2, 3]
+# room_id 为默认房间；省略时使用 room_ids 首项。默认房间不在列表时自动加入切房循环。
+# 在直播间按 F2 编辑全部配置；Ctrl+N/F6 在弹幕区、输入区均可切房。
+# room_ids = [7777, 1, 2]
 # room_switch_key = "ctrl+n"
+# settings_key = "f2"
 chat_buffer = 200
 show_room_title = true
 show_room_number = true

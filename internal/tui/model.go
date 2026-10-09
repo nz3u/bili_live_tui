@@ -58,9 +58,11 @@ type model struct {
 	lockBottom    bool
 	state         sessionState
 	roomIndex     int
+	roomRequest   uint64
 	switching     bool
 	sending       bool
 	sendStatus    string
+	settings      *settingsPanel
 }
 
 func InitialModel(room *api.LiveRoom) *model {
@@ -76,30 +78,40 @@ func InitialModel(room *api.LiveRoom) *model {
 		ready:        false,
 		lockBottom:   true,
 		state:        contentView,
+		roomIndex:    initialRoomIndex(room, LiveConfig),
+		roomRequest:  initialRoomRequest(room, LiveConfig),
 	}
 }
 
 type roomChangedMsg struct {
-	source  *api.LiveRoom
-	room    *api.LiveRoom
-	index   int
-	err     error
-	claimed chan struct{}
+	source      *api.LiveRoom
+	room        *api.LiveRoom
+	index       int
+	requestedID uint64
+	err         error
+	claimed     chan struct{}
 }
 
 func (m model) Close() { m.room.Close() }
 
 func (m model) switchRoom() tea.Cmd {
+	// Capture settings on the UI goroutine; a network command must not read
+	// mutable LiveConfig while the settings panel applies a newer version.
+	ids := configuredRooms(LiveConfig)
+	if len(ids) < 2 {
+		return nil
+	}
+	next := (roomIndexForRequest(m.room, ids, m.roomRequest) + 1) % len(ids)
+	return m.switchToRoom(ids[next], next)
+}
+
+func (m model) switchToRoom(id uint64, index int) tea.Cmd {
 	return func() tea.Msg {
-		if len(LiveConfig.RoomIDs) < 2 {
-			return nil
-		}
 		select {
 		case <-m.room.DoneChan:
 			return nil
 		default:
 		}
-		next := (m.roomIndex + 1) % len(LiveConfig.RoomIDs)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go func() {
@@ -109,7 +121,7 @@ func (m model) switchRoom() tea.Cmd {
 			case <-ctx.Done():
 			}
 		}()
-		room, err := live_room.AuthAndConnectContext(ctx, m.room.Client, LiveConfig.RoomIDs[next])
+		room, err := live_room.AuthAndConnectContext(ctx, m.room.Client, id)
 		if err != nil {
 			logging.Errorf("switch room failed, err=%v", err)
 			return roomChangedMsg{source: m.room, err: err}
@@ -118,7 +130,7 @@ func (m model) switchRoom() tea.Cmd {
 		// Commands may finish after Bubble Tea exits and discards their result.
 		// Until Update claims this room, the old session owns its cleanup.
 		go closeUnclaimedRoom(m.room.DoneChan, claimed, room)
-		return roomChangedMsg{source: m.room, room: room, index: next, claimed: claimed}
+		return roomChangedMsg{source: m.room, room: room, index: index, requestedID: id, claimed: claimed}
 	}
 }
 
@@ -144,40 +156,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		key := LiveConfig.RoomSwitchKey
-		if key == "" {
-			key = "ctrl+n"
-		}
-		if msg.String() == key && m.state == contentView {
-			if !m.switching && len(LiveConfig.RoomIDs) >= 2 {
-				m.switching = true
-				cmds = append(cmds, m.switchRoom())
-			}
-			break
-		}
-		switch msg.String() {
-		case "ctrl+c":
-			m.room.Close()
-			return m, tea.Quit
-		case "tab":
-			if m.state == contentView {
-				m.state = inputView
-				cmd = m.textInput.Focus()
-				cmds = append(cmds, cmd)
-			} else if m.state == inputView {
-				m.state = contentView
-				m.textInput.Blur()
-			}
-		case "enter":
-			if m.state == inputView && !m.sending {
-				needSend := m.textInput.Value()
-				if len(needSend) > 0 {
-					m.sending = true
-					m.sendStatus = "正在发送…"
-					cmd = m.sendDanmu(needSend)
-					cmds = append(cmds, cmd)
-				}
-			}
+		if handled, command := m.handleKey(msg); handled {
+			return m, command
 		}
 	case windowSizePollMsg:
 		if msg.room != m.room {
@@ -208,38 +188,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Otherwise rapid resizes can race the forwarded event.
 			cmds = append(cmds, waitForWindowResize(m.room, m.terminalSize))
 		}
-		verticalMarginWidth := 2 * focusMarginWidth
-		viewportWidth := max(1, msg.Width-verticalMarginWidth)
-		textWidth := max(1, msg.Width-verticalMarginWidth-3)
-		m.viewport.Width = viewportWidth
-		m.textInput.Placeholder = lipgloss.NewStyle().Width(textWidth).Render("Press Enter to Send")
-		m.textInput.Width = textWidth
-		headerHeight := lipgloss.Height(m.headerView()) + focusMarginHeight
-		footerHeight := lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 3*focusMarginHeight
-		viewportHeight := max(1, msg.Height-headerHeight-footerHeight)
-
-		if !m.ready {
-			m.viewport = viewport.New(viewportWidth, viewportHeight)
-			m.viewport.HighPerformanceRendering = false
-			m.ready = true
-		} else {
-			m.viewport.Width = viewportWidth
-			m.viewport.Height = viewportHeight
+		m.resizeLayout(msg)
+		if m.settings != nil {
+			m.settings.resize(msg)
 		}
-		m.viewport.YPosition = headerHeight
-		// Padding depends on viewport height; resizing must redraw existing
-		// messages immediately, even when the room is currently quiet.
-		m.viewport.SetContent(m.renderDanmu())
-		m.viewport.SetYOffset(m.viewport.YOffset)
 	case receivedDanmuMsg:
 		if msg.room != m.room {
 			break
 		}
 		cmds = append(cmds, waitForDanmu(m.room))
 		m.danmu.PushBack(msg.danmu)
-		for m.danmu.Len() > LiveConfig.ChatBuffer {
-			m.danmu.Remove(m.danmu.Front())
-		}
+		m.trimHistory()
 		if m.ready {
 			m.viewport.SetContent(m.renderDanmu())
 		}
@@ -260,6 +219,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.textInput.Value() == msg.content {
 				m.textInput.Reset()
 			}
+		}
+	case settingsSavedMsg:
+		if m.settings == nil || msg.panel != m.settings {
+			break
+		}
+		m.settings.saving = false
+		if msg.err != nil {
+			m.settings.status = msg.err.Error()
+			break
+		}
+		LiveConfig = cloneConfig(msg.config)
+		applyUserAgent(m.room.Client, LiveConfig.UserAgent)
+		m.roomIndex = roomIndexForRequest(m.room, configuredRooms(LiveConfig), m.roomRequest)
+		m.trimHistory()
+		m.resizeLayout(m.windowSize)
+		m.settings.snapshot = msg.snapshot
+		m.settings.setValues(LiveConfig)
+		m.settings.resize(m.windowSize)
+		m.settings.status = "保存成功，当前配置已应用；原文件已备份。"
+		if msg.enterDefault {
+			cmds = append(cmds, m.closeSettings())
+			if m.room.RoomID != LiveConfig.RoomID && m.room.ShortID != LiveConfig.RoomID {
+				m.switching, m.sendStatus = true, "正在进入默认直播间…"
+				cmds = append(cmds, m.switchToRoom(LiveConfig.RoomID, 0))
+			} else {
+				m.sendStatus = "配置已保存，当前已在默认直播间"
+			}
+		} else {
+			cmds = append(cmds, m.settings.focus(m.settings.cursor))
 		}
 	case roomChangedMsg:
 		closed := false
@@ -289,16 +277,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sending = false
 		m.sendStatus = ""
 		m.textInput.CharLimit = danmuLength(msg.room)
-		m.roomIndex = msg.index
+		m.roomRequest = msg.requestedID
+		m.roomIndex = roomIndexForRequest(msg.room, configuredRooms(LiveConfig), msg.requestedID)
 		m.danmu.Init()
 		cmds = append(cmds, waitForDanmu(m.room), waitForWindowResize(m.room, m.terminalSize))
-		if m.ready {
-			m.viewport.SetContent(m.renderDanmu())
-		}
+		m.resizeLayout(m.windowSize)
 	}
 
 	if m.lockBottom {
 		m.viewport.GotoBottom()
+	}
+
+	if m.settings != nil {
+		command, _ := m.settings.update(msg, m.switching)
+		cmds = append(cmds, command)
+		return m, tea.Batch(cmds...)
 	}
 
 	// if focus isn't on contentView, only mouse can be capture by viewport
@@ -322,6 +315,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.settings != nil {
+		return m.settings.view()
+	}
 	if !m.ready {
 		return "\nInitializing..."
 	}
@@ -462,8 +458,12 @@ func (m model) headerView() string {
 func (m model) footerView() string {
 	info := lipgloss.NewStyle().Render(fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100))
 	status := ""
+	hint := m.sendStatus
+	if hint == "" {
+		hint = fmt.Sprintf("Enter 输入/发送 · %s/F6 切房 · %s/F2 设置", roomSwitchKey(LiveConfig), settingsKey(LiveConfig))
+	}
 	if available := m.viewport.Width - lipgloss.Width(info); available > 0 {
-		status = lipgloss.NewStyle().MaxWidth(available).Render(strings.Join(strings.Fields(m.sendStatus), " "))
+		status = lipgloss.NewStyle().MaxWidth(available).Render(strings.Join(strings.Fields(hint), " "))
 	}
 	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(info)-lipgloss.Width(status)))
 	return lipgloss.JoinHorizontal(lipgloss.Center, status, line, info)

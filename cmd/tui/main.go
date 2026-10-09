@@ -21,7 +21,7 @@ func main() {
 	defer room.Close()
 	m := tui.InitialModel(room)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	finalModel, err := p.StartReturningModel()
+	finalModel, err := tui.RunProgram(p)
 	if closer, ok := finalModel.(interface{ Close() }); ok {
 		closer.Close()
 	}

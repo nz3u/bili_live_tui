@@ -1,17 +1,63 @@
-# .github/workflows/release.yaml
+# 发布流水线：推送 v* 标签后自动创建 Release 并上传全平台二进制
+#
+# 触发方式：
+#   1. 推送标签（推荐）：git tag v1.2.7 && git push origin v1.2.7
+#   2. 手动触发：Actions 页面 Run workflow，填写一个已存在的标签（用于重跑）
+#
+# 产物命名与压缩格式沿用历史版本，保持下载链接连续：
+#   bililive-v1.2.7-linux-amd64.tar.gz / .md5
+#   bililive-v1.2.7-windows-amd64.zip  / .md5
+name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的标签（如 v1.2.7，必须已经存在）'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+# 所有发布串行执行：避免手动重跑与标签推送同时向同一个 Release 覆盖 assets。
+# 不启用 cancel-in-progress，否则会把正在上传的发布打断在半途
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  # go-release-action 内部用 GetReleaseByTag 定位 Release，它只会上传 assets、
+  # 不会创建 Release，并且该接口查不到 draft。所以推标签后必须先建好一个
+  # 已发布的 Release（不能用 draft 之后再发布，那样下面的上传会找不到它）
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过创建（后续会按需覆盖同名 assets）"
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
   releases-matrix:
     name: Release Go Binary
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         goos: [ linux, darwin ]
         goarch: [ "386", amd64, arm64 ]
@@ -19,7 +65,11 @@ jobs:
           - goarch: "386"
             goos: darwin
     steps:
-      - uses: actions/checkout@v4
+      # 标签推送时 checkout 标签指向的提交；手动触发时 checkout 指定标签
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
       - uses: wangyoucao577/go-release-action@v1
         with:
           github_token: ${{ github.token }}
@@ -27,17 +77,26 @@ jobs:
           goarch: ${{ matrix.goarch }}
           project_path: "./cmd/tui"
           binary_name: "bililive"
+          # 必须显式指定，否则手动触发时 action 无法定位目标 Release
+          release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          # 重跑（如某个平台上传失败后重试）时覆盖同名 asset
+          overwrite: true
           extra_files: LICENSE README.MD config.toml
 
   releases-win-matrix:
     name: Release Go Binary
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         goos: [ windows ]
         goarch: [ "386", amd64, arm64 ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
       - uses: wangyoucao577/go-release-action@v1
         with:
           github_token: ${{ github.token }}
@@ -45,4 +104,6 @@ jobs:
           goarch: ${{ matrix.goarch }}
           project_path: "./cmd/tui"
           binary_name: "bililive"
+          release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          overwrite: true
           extra_files: LICENSE README.MD config.toml start.bat

@@ -1,0 +1,48 @@
+# 持续集成：仅在 PR 上（合并前）自动构建与测试
+# 只验证改动能否通过构建与测试，不自动合并；合并到 master 后不再重复跑
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# 同一分支/PR 有新提交时取消上一次仍在跑的 CI
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 项目主要面向 Windows（start.bat、终端编码、resize/键盘等 Windows 专有代码），
+        # 因此额外在 Windows 上编译一遍，确保 windows 构建标签下的代码与测试能通过编译
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # 以 go.mod 声明的版本为准（当前 go 1.21）
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      # vet 也会编译测试文件，Windows 上可覆盖 keyboard_windows_test.go
+      - name: Vet
+        run: go vet ./...
+
+      # 与 README「开发验证」命令一致：回归测试全部使用本地模拟 HTTP/TCP 服务，
+      # 不登录、不向真实直播间发送弹幕。
+      # 只在 Linux 上真正执行：Windows 的键盘测试会新建一个隐藏控制台并注入按键
+      # （internal/tui/keyboard_windows_test.go），依赖交互式控制台，在 CI 里容易不稳定
+      - name: Test
+        if: runner.os == 'Linux'
+        run: go test ./... -count=1 -timeout=120s

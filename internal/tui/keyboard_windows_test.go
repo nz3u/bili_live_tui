@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/shr-go/bili_live_tui/api"
 	"golang.org/x/sys/windows"
 )
 
@@ -53,6 +54,9 @@ type consoleProgramProbe struct {
 	login  bool
 	stage  int
 	err    error
+	// opened collects the pages Alt+F asked to open. It is a pointer because
+	// Update has a value receiver, so the slice must outlive its copies.
+	opened *[]string
 }
 
 func (m consoleProgramProbe) Init() tea.Cmd {
@@ -109,8 +113,25 @@ func (m consoleProgramProbe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.stage++
-		return m, injectConsoleKeys(m.handle, consoleKeyRecord{VirtualKey: 'N', Unicode: 0x0e, Control: 0x0008})
+		// Inject ESC and 'f' in one call so they reach the decoder as one chunk:
+		// the console reports Alt+F as the ESC-prefixed sequence.
+		return m, injectConsoleKeys(m.handle,
+			consoleKeyRecord{VirtualKey: 0x1b, Unicode: 0x1b},
+			consoleKeyRecord{VirtualKey: 'F', Unicode: 'f'})
 	case 4:
+		// Alt+F must survive the real console decoder (conhost reports ESC 'f')
+		// and must not disturb the draft or focus.
+		if key.String() != "alt+f" || !m.inner.textInput.Focused() || m.inner.textInput.Value() != "测试ok" {
+			m.err = fmt.Errorf("console Alt+F was not decoded or lost focus/draft")
+			return m, tea.Quit
+		}
+		if len(*m.opened) != 1 || (*m.opened)[0] != roomPageURL(m.inner.room) {
+			m.err = fmt.Errorf("console Alt+F opened %v, want %s", *m.opened, roomPageURL(m.inner.room))
+			return m, tea.Quit
+		}
+		m.stage++
+		return m, injectConsoleKeys(m.handle, consoleKeyRecord{VirtualKey: 'N', Unicode: 0x0e, Control: 0x0008})
+	case 5:
 		if key.String() != "ctrl+n" || !m.inner.switching || cmd == nil {
 			m.err = fmt.Errorf("console Ctrl+N did not request a switch from input view")
 		}
@@ -162,10 +183,18 @@ func TestWindowsConsoleKeyboardLifecycle(t *testing.T) {
 			return
 		}
 		report.Modes = append(report.Modes, original)
+		// Never launch a real browser from a test; record the requested page.
+		opened := new([]string)
+		previousOpen := openRoomPage
+		openRoomPage = func(room *api.LiveRoom) error {
+			*opened = append(*opened, roomPageURL(room))
+			return nil
+		}
+		defer func() { openRoomPage = previousOpen }()
 		for _, login := range []bool{true, false} {
 			room := uiTestRoom()
 			room.RoomID = 1
-			final, err := RunProgram(tea.NewProgram(consoleProgramProbe{inner: *InitialModel(room), handle: handle, login: login}, tea.WithAltScreen()))
+			final, err := RunProgram(tea.NewProgram(consoleProgramProbe{inner: *InitialModel(room), handle: handle, login: login, opened: opened}, tea.WithAltScreen()))
 			room.Close()
 			if err != nil {
 				report.Error = err.Error()
@@ -203,7 +232,8 @@ func TestWindowsConsoleKeyboardLifecycle(t *testing.T) {
 	defer log.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	// Match start.bat: only OutputEncoding changes; do not force InputEncoding.
+	// Match the encoding the shipped binary now sets for itself: only
+	// OutputEncoding changes; do not force InputEncoding.
 	script := fmt.Sprintf("& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8}; & '%s' '-test.run=^TestWindowsConsoleKeyboardLifecycle$' '-test.timeout=10s'", strings.ReplaceAll(executable, "'", "''"))
 	command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", script)
 	command.Dir = directory
@@ -224,7 +254,7 @@ func TestWindowsConsoleKeyboardLifecycle(t *testing.T) {
 	if report.Error != "" {
 		t.Fatal(report.Error)
 	}
-	if len(report.Stages) != 2 || report.Stages[0] != 1 || report.Stages[1] != 5 || len(report.Modes) != 3 {
+	if len(report.Stages) != 2 || report.Stages[0] != 1 || report.Stages[1] != 6 || len(report.Modes) != 3 {
 		t.Fatalf("incomplete console keyboard lifecycle: %+v", report)
 	}
 }

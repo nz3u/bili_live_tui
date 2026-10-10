@@ -206,6 +206,9 @@ type QRCodeLoginData struct {
 	QRString string
 	QRKey    string
 	Status   QRLoginStatus
+	// QRImagePath is the absolute path of the saved login.png fallback, empty
+	// when the image could not be written.
+	QRImagePath string
 }
 
 type PollLoginResp struct {

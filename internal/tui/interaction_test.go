@@ -93,9 +93,9 @@ func TestSingleRoomSwitchProvidesFeedback(t *testing.T) {
 	LiveConfig.RoomID, LiveConfig.RoomIDs = 7777, nil
 	m := InitialModel(uiTestRoom())
 	defer m.Close()
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
 	got := updated.(model)
-	if cmd != nil || got.switching || !strings.Contains(got.sendStatus, "设置") {
+	if got.switching || !strings.Contains(got.sendHint, "设置") {
 		t.Fatal("single-room switch silently did nothing")
 	}
 }

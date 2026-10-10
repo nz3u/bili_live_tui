@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 项目主要面向 Windows（start.bat、终端编码、resize/键盘等 Windows 专有代码），
+        # 项目主要面向 Windows（终端编码、控制台代码页、resize/键盘等 Windows 专有代码），
         # 因此额外在 Windows 上编译一遍，确保 windows 构建标签下的代码与测试能通过编译
         os: [ubuntu-latest, windows-latest]
     steps:

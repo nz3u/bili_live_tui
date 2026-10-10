@@ -61,8 +61,11 @@ type model struct {
 	roomRequest   uint64
 	switching     bool
 	sending       bool
-	sendStatus    string
-	settings      *settingsPanel
+	// sendHint replaces the removed danmu-area status bar: it is rendered in
+	// the send box and expires on its own. sendHintSeq invalidates stale timers.
+	sendHint    string
+	sendHintSeq uint64
+	settings    *settingsPanel
 }
 
 func InitialModel(room *api.LiveRoom) *model {
@@ -132,6 +135,18 @@ func (m model) switchToRoom(id uint64, index int) tea.Cmd {
 		go closeUnclaimedRoom(m.room.DoneChan, claimed, room)
 		return roomChangedMsg{source: m.room, room: room, index: index, requestedID: id, claimed: claimed}
 	}
+}
+
+// restoreFailedDraft puts a rejected draft back into the send box. User input has
+// the highest priority: a draft the user typed while the request was in flight
+// (or a box already holding other text) is never replaced. A failed draft
+// normally survives the request anyway; this also covers a box emptied meanwhile.
+func (m *model) restoreFailedDraft(content string) {
+	if content == "" || m.textInput.Value() != "" {
+		return
+	}
+	m.textInput.SetValue(content)
+	m.textInput.CursorEnd()
 }
 
 func (m model) sendDanmu(needSend string) tea.Cmd {
@@ -207,19 +222,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // A late reply from the previous room must not alter this draft.
 		}
 		m.sending = false
-		if msg.err != nil {
-			m.sendStatus = msg.err.Error()
-		} else if msg.reply != "" {
+		switch {
+		case msg.err != nil:
+			// Failure: restore the failed draft so it can be fixed and resent,
+			// but never clobber anything the user typed in the meantime.
+			m.restoreFailedDraft(msg.content)
+			cmds = append(cmds, m.showHint(msg.err.Error(), sendResultHintDuration))
+		case msg.reply != "":
 			// Some API responses have code=0 but still carry a filtering hint.
-			// Display it and retain the draft instead of claiming delivery.
-			m.sendStatus = "发送接口回复: " + msg.reply
+			// Keep the draft instead of claiming delivery.
 			logging.Warnf("send danmu API reply: %s", msg.reply)
-		} else {
-			m.sendStatus = "发送请求已接受"
+			cmds = append(cmds, m.showHint("发送接口回复: "+msg.reply, sendResultHintDuration))
+		default:
+			cmds = append(cmds, m.showHint("发送成功", sendResultHintDuration))
 			if m.textInput.Value() == msg.content {
 				m.textInput.Reset()
 			}
 		}
+		// The branches above may have changed the draft (restored on failure,
+		// cleared on success) after showHint refreshed the placeholder, so the
+		// box must be refreshed again to reflect the final draft.
+		m.refreshInputPlaceholder()
+		m.layoutInputWidth()
+	case hintExpiredMsg:
+		if msg.room != m.room || msg.seq != m.sendHintSeq {
+			break // Superseded by a newer hint or a different room.
+		}
+		m.clearHint()
 	case settingsSavedMsg:
 		if m.settings == nil || msg.panel != m.settings {
 			break
@@ -241,10 +270,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.enterDefault {
 			cmds = append(cmds, m.closeSettings())
 			if m.room.RoomID != LiveConfig.RoomID && m.room.ShortID != LiveConfig.RoomID {
-				m.switching, m.sendStatus = true, "正在进入默认直播间…"
+				m.switching = true
+				cmds = append(cmds, m.showHint("正在进入默认直播间…", hintSticky))
 				cmds = append(cmds, m.switchToRoom(LiveConfig.RoomID, 0))
 			} else {
-				m.sendStatus = "配置已保存，当前已在默认直播间"
+				cmds = append(cmds, m.showHint("配置已保存，当前已在默认直播间", noticeHintDuration))
 			}
 		} else {
 			cmds = append(cmds, m.settings.focus(m.settings.cursor))
@@ -267,7 +297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.switching = false
 		if msg.err != nil {
-			m.sendStatus = "切换失败: " + msg.err.Error()
+			cmds = append(cmds, m.showHint("切换失败: "+msg.err.Error(), noticeHintDuration))
 			break
 		}
 		close(msg.claimed)
@@ -275,11 +305,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.room = msg.room
 		m.pendingResize = nil
 		m.sending = false
-		m.sendStatus = ""
+		m.clearHint()
 		m.textInput.CharLimit = danmuLength(msg.room)
 		m.roomRequest = msg.requestedID
 		m.roomIndex = roomIndexForRequest(msg.room, configuredRooms(LiveConfig), msg.requestedID)
 		m.danmu.Init()
+		m.refreshInputPlaceholder()
 		cmds = append(cmds, waitForDanmu(m.room), waitForWindowResize(m.room, m.terminalSize))
 		m.resizeLayout(m.windowSize)
 	}
@@ -314,6 +345,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// View renders the chat history, the room header and the send box. The danmu
+// area has no status bar row any more: notices share the send box (see hint.go).
 func (m model) View() string {
 	if m.settings != nil {
 		return m.settings.view()
@@ -321,17 +354,19 @@ func (m model) View() string {
 	if !m.ready {
 		return "\nInitializing..."
 	}
-	minimumHeight := lipgloss.Height(m.headerView()) + lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 4*focusMarginHeight + 1
+	inputStr := m.inputRow()
+	// header + input rows, plus one row per focus-margin border line, plus at
+	// least one viewport row.
+	minimumHeight := lipgloss.Height(m.headerView()) + lipgloss.Height(inputStr) + 4*focusMarginHeight + 1
 	if m.windowSize.Width < 6 || m.windowSize.Height < minimumHeight {
 		return lipgloss.NewStyle().MaxWidth(max(1, m.windowSize.Width)).MaxHeight(1).Render("Resize terminal")
 	}
 	var s string
-	contentStr := fmt.Sprintf("%s\n%s\n%s", m.headerView(), m.viewport.View(), m.footerView())
-	textStr := m.textInput.View()
+	contentStr := fmt.Sprintf("%s\n%s", m.headerView(), m.viewport.View())
 	if m.state == contentView {
-		s = lipgloss.JoinVertical(lipgloss.Left, focusedStyle.Render(contentStr), unFocusedStyle.Render(textStr))
+		s = lipgloss.JoinVertical(lipgloss.Left, focusedStyle.Render(contentStr), unFocusedStyle.Render(inputStr))
 	} else {
-		s = lipgloss.JoinVertical(lipgloss.Left, unFocusedStyle.Render(contentStr), focusedStyle.Render(textStr))
+		s = lipgloss.JoinVertical(lipgloss.Left, unFocusedStyle.Render(contentStr), focusedStyle.Render(inputStr))
 	}
 	return s
 }
@@ -423,6 +458,9 @@ func pollWindowResize(room *api.LiveRoom, lastSize func() tea.WindowSizeMsg, tic
 	}
 }
 
+// headerView renders the room line. It also carries the scroll percentage that
+// used to live in the removed danmu-area status bar, so no extra row is spent on
+// it: the header already ends in filler that was otherwise unused.
 func (m model) headerView() string {
 	b := lipgloss.RoundedBorder()
 	b.Right = "├"
@@ -449,24 +487,16 @@ func (m model) headerView() string {
 		}
 	}
 
-	title := lipgloss.NewStyle().BorderStyle(b).Padding(0, 1).
-		MaxWidth(max(1, m.viewport.Width)).Render(header)
-	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(title)))
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, line)
-}
-
-func (m model) footerView() string {
-	info := lipgloss.NewStyle().Render(fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100))
-	status := ""
-	hint := m.sendStatus
-	if hint == "" {
-		hint = fmt.Sprintf("Enter 输入/发送 · %s/F6 切房 · %s/F2 设置", roomSwitchKey(LiveConfig), settingsKey(LiveConfig))
+	width := max(1, m.viewport.Width)
+	title := lipgloss.NewStyle().BorderStyle(b).Padding(0, 1).MaxWidth(width).Render(header)
+	scroll := fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100)
+	// Only show the percentage when it fits beside the title; a cramped header
+	// must never push the frame wider than the terminal.
+	if lipgloss.Width(title)+lipgloss.Width(scroll) > width {
+		scroll = ""
 	}
-	if available := m.viewport.Width - lipgloss.Width(info); available > 0 {
-		status = lipgloss.NewStyle().MaxWidth(available).Render(strings.Join(strings.Fields(hint), " "))
-	}
-	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(info)-lipgloss.Width(status)))
-	return lipgloss.JoinHorizontal(lipgloss.Center, status, line, info)
+	line := strings.Repeat("─", max(0, width-lipgloss.Width(title)-lipgloss.Width(scroll)))
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, line, scroll)
 }
 
 func (m model) renderDanmu() string {

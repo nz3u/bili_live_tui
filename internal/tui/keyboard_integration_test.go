@@ -17,10 +17,43 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/shr-go/bili_live_tui/api"
 	"github.com/shr-go/bili_live_tui/internal/live_room"
 )
 
 type keyboardPost struct{ room, content string }
+
+// openedRoomPages records the pages Alt+F asked the system to open. The stub is
+// installed for the whole integration test so no real browser is ever launched.
+var (
+	openedRoomPagesMu sync.Mutex
+	openedRoomPagesNS []string
+)
+
+func openedRoomPages() []string {
+	openedRoomPagesMu.Lock()
+	defer openedRoomPagesMu.Unlock()
+	return append([]string(nil), openedRoomPagesNS...)
+}
+
+func resetOpenedRoomPages() {
+	openedRoomPagesMu.Lock()
+	defer openedRoomPagesMu.Unlock()
+	openedRoomPagesNS = nil
+}
+
+func stubRoomPageOpener(t *testing.T) {
+	t.Helper()
+	previous := openRoomPage
+	t.Cleanup(func() { openRoomPage = previous })
+	resetOpenedRoomPages()
+	openRoomPage = func(room *api.LiveRoom) error {
+		openedRoomPagesMu.Lock()
+		defer openedRoomPagesMu.Unlock()
+		openedRoomPagesNS = append(openedRoomPagesNS, roomPageURL(room))
+		return nil
+	}
+}
 
 type keyboardFixture struct {
 	listener net.Listener
@@ -176,7 +209,7 @@ func (m keyboardProgramProbe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.inner.Update(msg)
 	m.inner = updated.(model)
 	event := keyboardEvent{draft: m.inner.textInput.Value(), input: m.inner.textInput.Focused(), panel: m.inner.settings != nil,
-		room: m.inner.room.RoomID, switching: m.inner.switching, sending: m.inner.sending, width: m.inner.windowSize.Width, status: m.inner.sendStatus}
+		room: m.inner.room.RoomID, switching: m.inner.switching, sending: m.inner.sending, width: m.inner.windowSize.Width, status: m.inner.sendHint}
 	if m.inner.settings != nil {
 		event.defaultField = m.inner.settings.fields[0].input.Value()
 		event.roomListField = m.inner.settings.fields[1].input.Value()
@@ -212,6 +245,7 @@ func (m keyboardProgramProbe) View() string { return m.inner.View() }
 // real local TCP rooms, mocked HTTP sends, settings disk writes and focus.
 func TestRawKeyboardSettingsResizeSwitchAndSend(t *testing.T) {
 	settingsTestConfig(t)
+	stubRoomPageOpener(t)
 	fixture, client := newKeyboardFixture(t)
 	room, err := live_room.AuthAndConnect(client, 1)
 	if err != nil {
@@ -295,7 +329,7 @@ func TestRawKeyboardSettingsResizeSwitchAndSend(t *testing.T) {
 	})
 	wait(func(e keyboardEvent) bool { return e.kind == "receive" && e.content == "room-2" })
 	write("\r")
-	if e := wait(func(e keyboardEvent) bool { return e.kind == "send" }); e.room != 2 || e.draft != "" || e.status != "发送请求已接受" {
+	if e := wait(func(e keyboardEvent) bool { return e.kind == "send" }); e.room != 2 || e.draft != "" || e.status != "发送成功" {
 		t.Fatalf("bad send: %+v", e)
 	}
 	select {
@@ -309,6 +343,16 @@ func TestRawKeyboardSettingsResizeSwitchAndSend(t *testing.T) {
 	write("\x1b[17~") // F6 fallback, also while typing
 	wait(func(e keyboardEvent) bool { return e.kind == "room" && e.room == 3 && e.input })
 	wait(func(e keyboardEvent) bool { return e.kind == "receive" && e.content == "room-3" })
+	// Alt+F must be decoded from the real ESC-prefixed sequence, open the page of
+	// the room currently subscribed to, and leave the draft/focus alone. Assert on
+	// the one event that carries the key: wait() consumes it from the channel.
+	write("\x1bf")
+	if e := wait(func(e keyboardEvent) bool { return e.kind == "key" && e.key == "alt+f" }); !strings.Contains(e.status, "浏览器") || !e.input || e.draft != "" {
+		t.Fatalf("alt+f gave no feedback or changed focus/draft: %+v", e)
+	}
+	if urls := openedRoomPages(); len(urls) != 1 || urls[0] != "https://live.bilibili.com/3" {
+		t.Fatalf("alt+f opened %v, want the current room page", urls)
+	}
 	write("\t")
 	wait(func(e keyboardEvent) bool { return e.kind == "key" && e.key == "tab" && !e.input })
 	write("\n") // LF/ctrl+j also enters the field
@@ -317,7 +361,7 @@ func TestRawKeyboardSettingsResizeSwitchAndSend(t *testing.T) {
 	wait(func(e keyboardEvent) bool { return e.kind == "key" && e.draft == "again" })
 	write("\n")
 	wait(func(e keyboardEvent) bool {
-		return e.kind == "send" && e.room == 3 && e.draft == "" && e.status == "发送请求已接受"
+		return e.kind == "send" && e.room == 3 && e.draft == "" && e.status == "发送成功"
 	})
 	select {
 	case post := <-fixture.posts:

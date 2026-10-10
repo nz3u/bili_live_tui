@@ -286,7 +286,7 @@ func (p *settingsPanel) view() string {
 		status = "默认房间用于下次启动；也可选择保存并进入默认房间。"
 	}
 	lines := []string{
-		fitSettingsLine("设置 · Tab/↑↓ 选择 · 空格/Enter 切换选项", p.width),
+		fitSettingsLine("设置 • Tab/↑↓ 选择 • 空格/Enter 切换选项", p.width),
 		fitSettingsLine("配置: "+p.snapshot.path, p.width),
 	}
 	lines = append(lines, body...)
@@ -300,15 +300,13 @@ func (p *settingsPanel) view() string {
 func (m *model) openSettings() tea.Cmd {
 	snapshot, err := readConfigSnapshot(configFilePath)
 	if err != nil {
-		m.sendStatus = "读取设置失败: " + err.Error()
-		return nil
+		return m.showHint("读取设置失败: "+err.Error(), noticeHintDuration)
 	}
 	cfg := cloneConfig(LiveConfig)
 	if snapshot.exists {
 		cfg, err = decodeConfig(snapshot.raw)
 		if err != nil {
-			m.sendStatus = "读取设置失败: " + err.Error()
-			return nil
+			return m.showHint("读取设置失败: "+err.Error(), noticeHintDuration)
 		}
 	}
 	m.textInput.Blur()

@@ -174,7 +174,7 @@ func TestResizeRebuildsViewportWithoutNewDanmu(t *testing.T) {
 	got := updated.(model)
 	updated, _ = got.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	got = updated.(model)
-	if got.viewport.Width != 98 || got.textInput.Width != 95 {
+	if got.viewport.Width != 98 || got.textInput.Width != 96 {
 		t.Fatal("widths were not updated")
 	}
 	if !strings.Contains(got.viewport.View(), "latest") {
@@ -269,7 +269,7 @@ func TestNarrowTerminalFitsLongTitleAndStatus(t *testing.T) {
 	defer room.Close()
 	room.Title = strings.Repeat("很长的标题", 20)
 	m := InitialModel(room)
-	m.sendStatus = strings.Repeat("很长的发送错误", 20)
+	m.sendHint = strings.Repeat("很长的发送错误", 20)
 	m.textInput.SetValue("弹幕草稿")
 	for _, size := range []tea.WindowSizeMsg{{Width: 18, Height: 9}, {Width: 18, Height: 20}, {Width: 100, Height: 40}} {
 		updated, _ := m.Update(size)

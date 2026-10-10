@@ -5,3 +5,11 @@
 temp/
 .gocache/
 .vscode/
+
+# Build output: the binary is produced by `go build` and published by the
+# release workflow, not tracked in the repository.
+/tui.exe
+*.exe
+
+# Windows file-permission diagnostic backups (local troubleshooting artifacts)
+.acl-recovery/

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,44 @@ func TestPostDanmuMissingCredentialsDoNotSend(t *testing.T) {
 	}
 }
 
+// Update returns a tea.Batch of several commands (the hint timer plus the send
+// or switch work), and batchMsg is unexported in this Bubble Tea version, so walk
+// the returned message reflectively to find the scheduled hint expiry.
+func findHintExpiry(msg tea.Msg) (hintExpiredMsg, bool) {
+	if expiry, ok := msg.(hintExpiredMsg); ok {
+		return expiry, true
+	}
+	if msg == nil {
+		return hintExpiredMsg{}, false
+	}
+	value := reflect.ValueOf(msg)
+	if value.Kind() != reflect.Slice {
+		return hintExpiredMsg{}, false
+	}
+	for i := 0; i < value.Len(); i++ {
+		next, ok := value.Index(i).Interface().(tea.Cmd)
+		if !ok {
+			continue
+		}
+		if expiry, ok := findHintExpiry(next()); ok {
+			return expiry, true
+		}
+	}
+	return hintExpiredMsg{}, false
+}
+
+func hintExpiryFromCmd(t *testing.T, cmd tea.Cmd) hintExpiredMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("no command returned")
+	}
+	expiry, ok := findHintExpiry(cmd())
+	if !ok {
+		t.Fatal("no hint expiry was scheduled")
+	}
+	return expiry
+}
+
 func TestSendResultRetainsFailedDraft(t *testing.T) {
 	room := sendTestRoom("", 200)
 	m := InitialModel(room)
@@ -111,17 +150,118 @@ func TestSendResultRetainsFailedDraft(t *testing.T) {
 	m.sending = true
 	updated, _ := m.Update(sendResultMsg{room: room, content: "draft", err: errors.New("blocked")})
 	got := updated.(model)
-	if got.textInput.Value() != "draft" || got.sending || got.sendStatus != "blocked" {
-		t.Fatalf("failed send discarded draft or status: %+v", got)
+	if got.textInput.Value() != "draft" || got.sending || !strings.Contains(got.sendHint, "blocked") {
+		t.Fatalf("failed send discarded draft or hint: %+v", got)
 	}
 	updated, _ = got.Update(sendResultMsg{room: room, content: "draft", reply: "f"})
 	got = updated.(model)
-	if got.textInput.Value() != "draft" || !strings.Contains(got.sendStatus, "f") {
+	if got.textInput.Value() != "draft" || !strings.Contains(got.sendHint, "f") {
 		t.Fatal("API hint was hidden")
 	}
 	updated, _ = got.Update(sendResultMsg{room: room, content: "draft"})
-	if updated.(model).textInput.Value() != "" {
-		t.Fatal("accepted draft not cleared")
+	got = updated.(model)
+	if got.textInput.Value() != "" || got.sendHint != "发送成功" {
+		t.Fatalf("accepted draft not cleared or success not hinted: %q %q", got.textInput.Value(), got.sendHint)
+	}
+}
+
+// A failure restores the rejected draft so it can be fixed and resent.
+func TestFailedSendRestoresDraftIntoEmptyBox(t *testing.T) {
+	room := sendTestRoom("", 200)
+	m := InitialModel(room)
+	m.state = inputView
+	m.sending = true
+	updated, _ := m.Update(sendResultMsg{room: room, content: "被拒绝的草稿", err: errors.New("发送失败 (1003212): 内容被过滤")})
+	got := updated.(model)
+	if got.textInput.Value() != "被拒绝的草稿" {
+		t.Fatalf("failed draft was not restored: %q", got.textInput.Value())
+	}
+	if !strings.Contains(got.sendHint, "发送失败") || got.sending {
+		t.Fatalf("failure was not reported in the send box: %+v", got)
+	}
+}
+
+// User input outranks the feedback: a draft typed while the send was in flight is
+// never replaced, and the hint must not disturb typing.
+func TestNewInputWinsOverRestoredDraftAndHint(t *testing.T) {
+	room := sendTestRoom("", 200)
+	m := InitialModel(room)
+	m.state = inputView
+	m.textInput.Focus()
+	m.sending = true
+	// The user starts typing before the failure arrives.
+	m.textInput.SetValue("用户新输入")
+	updated, _ := m.Update(sendResultMsg{room: room, content: "旧草稿", err: errors.New("发送失败")})
+	got := updated.(model)
+	if got.textInput.Value() != "用户新输入" {
+		t.Fatalf("restored draft replaced newer user input: %q", got.textInput.Value())
+	}
+	// Continued typing still works while the failure hint is displayed.
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("！")})
+	got = updated.(model)
+	if got.textInput.Value() != "用户新输入！" {
+		t.Fatalf("hint blocked typing: %q", got.textInput.Value())
+	}
+	if got.textInput.Placeholder != blurredInputPlaceholder && got.textInput.Placeholder != focusedInputPlaceholder {
+		t.Fatalf("hint replaced the input placeholder while a draft exists: %q", got.textInput.Placeholder)
+	}
+}
+
+// Success and failure hints both expire on their own after one second.
+func TestSendHintExpiresAfterOneSecond(t *testing.T) {
+	room := sendTestRoom("", 200)
+	for _, tc := range []struct {
+		name string
+		msg  sendResultMsg
+	}{
+		{"success", sendResultMsg{room: room, content: "draft"}},
+		{"failure", sendResultMsg{room: room, content: "draft", err: errors.New("blocked")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := InitialModel(room)
+			m.textInput.SetValue("draft")
+			m.sending = true
+			updated, cmd := m.Update(tc.msg)
+			got := updated.(model)
+			if got.sendHint == "" || cmd == nil {
+				t.Fatalf("%s hint missing or never scheduled to expire: %+v", tc.name, got)
+			}
+			// The scheduled command must include the expiry timer, and applying
+			// it must clear the hint.
+			expiry := hintExpiryFromCmd(t, cmd)
+			updated, _ = got.Update(expiry)
+			if updated.(model).sendHint != "" {
+				t.Fatalf("%s hint outlived its one-second window", tc.name)
+			}
+		})
+	}
+}
+
+// A stale timer must not clear a newer hint, and another room's timer must not
+// touch this room's hint.
+func TestStaleHintTimerDoesNotClearNewerHint(t *testing.T) {
+	room := sendTestRoom("", 200)
+	m := InitialModel(room)
+	m.sending = true
+	updated, first := m.Update(sendResultMsg{room: room, content: "draft"})
+	got := updated.(model)
+	stale := hintExpiryFromCmd(t, first)
+
+	// A newer hint arrives before the old timer fires.
+	got.sending = true
+	got.textInput.SetValue("draft")
+	updated, _ = got.Update(sendResultMsg{room: room, content: "draft", err: errors.New("newer failure")})
+	got = updated.(model)
+
+	updated, _ = got.Update(stale)
+	if updated.(model).sendHint != "newer failure" {
+		t.Fatalf("stale timer cleared the newer hint: %q", updated.(model).sendHint)
+	}
+	// A timer from another room is ignored entirely.
+	other := sendTestRoom("", 200)
+	updated, _ = got.Update(hintExpiredMsg{room: other, seq: got.sendHintSeq})
+	if updated.(model).sendHint == "" {
+		t.Fatal("timer from another room cleared the hint")
 	}
 }
 

@@ -12,9 +12,15 @@ import (
 
 // Bubbles v0.14.0 styles Placeholder[:1] and Placeholder[1:] separately.
 // Give its cursor a one-byte ASCII cell so SGR escapes never split a Chinese
-// rune. Keep this hint shared by focus changes and relayouts.
+// rune. Keep these hints shared by focus changes and relayouts; the shortcut
+// list lives here because the danmu-area status bar that used to show it was
+// removed (see hint.go).
+//
+// The separators are U+2022 bullets rather than U+00B7 middle dots: the Windows
+// console draws U+00B7 two cells wide while go-runewidth reports one cell, so
+// middle dots in this row make its measured width drift.
 const focusedInputPlaceholder = " 输入弹幕，Enter 发送，Esc 返回"
-const blurredInputPlaceholder = "Enter 输入 · Tab 切焦点 · F2 设置 · F6 切房"
+const blurredInputPlaceholder = " Enter/Tab 输入 • Ctrl+N 切房 • F2 设置 • Alt+F 网页"
 
 // Consumed shortcuts must not reach the text field or scroll viewport again.
 // In particular, the settings panel is modal only for input, not subscriptions.
@@ -23,6 +29,14 @@ func (m *model) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	if key == "ctrl+c" {
 		m.Close()
 		return true, tea.Quit
+	}
+	// Alt+F opens the current room's web page. Handled before the settings panel
+	// so the shortcut works from every view; it never touches the draft.
+	if key == "alt+f" {
+		if err := openRoomPage(m.room); err != nil {
+			return true, m.showHint("打开直播间网页失败: "+err.Error(), noticeHintDuration)
+		}
+		return true, m.showHint("已在浏览器打开直播间网页", noticeHintDuration)
 	}
 	if key == "f2" || key == settingsKey(LiveConfig) {
 		if m.settings != nil {
@@ -45,11 +59,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		if len(configuredRooms(LiveConfig)) < 2 {
-			m.sendStatus = "只有一个直播间；请按 F2 打开设置添加房间"
-			return true, nil
+			return true, m.showHint("只有一个直播间；请按 F2 打开设置添加房间", noticeHintDuration)
 		}
-		m.switching, m.sendStatus = true, "正在切换直播间…"
-		return true, m.switchRoom()
+		m.switching = true
+		return true, tea.Batch(m.showHint("正在切换直播间…", hintSticky), m.switchRoom())
 	}
 	switch key {
 	case "tab", "shift+tab":
@@ -71,34 +84,31 @@ func (m *model) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		if m.switching {
-			m.sendStatus = "正在切房，请稍后发送；草稿已保留"
-			return true, nil
+			return true, m.showHint("正在切房，请稍后发送；草稿已保留", noticeHintDuration)
 		}
 		content := m.textInput.Value()
 		if strings.TrimSpace(content) == "" {
-			m.sendStatus = "请先输入弹幕内容"
-			return true, nil
+			return true, m.showHint("请先输入弹幕内容", noticeHintDuration)
 		}
 		if utf8.RuneCountInString(content) > danmuLength(m.room) {
-			m.sendStatus = fmt.Sprintf("当前房间最多发送 %d 字；请缩短草稿后重试", danmuLength(m.room))
-			return true, nil
+			return true, m.showHint(fmt.Sprintf("当前房间最多发送 %d 字；请缩短草稿后重试", danmuLength(m.room)), noticeHintDuration)
 		}
-		m.sending, m.sendStatus = true, "正在发送…"
-		return true, m.sendDanmu(content)
+		m.sending = true
+		return true, tea.Batch(m.showHint("正在发送…", hintSticky), m.sendDanmu(content))
 	}
 	return false, nil
 }
 
 func (m *model) focusInput() tea.Cmd {
 	m.state = inputView
-	m.textInput.Placeholder = focusedInputPlaceholder
+	m.refreshInputPlaceholder()
 	return m.textInput.Focus()
 }
 
 func (m *model) blurInput() {
 	m.state = contentView
-	m.textInput.Placeholder = blurredInputPlaceholder
 	m.textInput.Blur()
+	m.refreshInputPlaceholder()
 }
 
 func (m *model) trimHistory() {
@@ -119,15 +129,16 @@ func (m *model) resizeLayout(size tea.WindowSizeMsg) {
 	}
 	viewportWidth := max(1, size.Width-2*focusMarginWidth)
 	m.viewport.Width = viewportWidth
-	m.textInput.Width = max(1, viewportWidth-3)
-	if m.state == inputView {
-		m.textInput.Placeholder = focusedInputPlaceholder
-	} else {
-		m.textInput.Placeholder = blurredInputPlaceholder
-	}
+	// The placeholder/hint width depends on the viewport width, so refresh both
+	// before measuring the send box height.
+	m.refreshInputPlaceholder()
+	m.layoutInputWidth()
+	// The focused and unfocused styles each draw a top and a bottom border row.
+	// They used to also wrap the removed status bar, so the viewport gains the
+	// row that bar occupied.
 	headerHeight := lipgloss.Height(m.headerView()) + focusMarginHeight
-	footerHeight := lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 3*focusMarginHeight
-	viewportHeight := max(1, size.Height-headerHeight-footerHeight)
+	inputHeight := lipgloss.Height(m.inputRow()) + 3*focusMarginHeight
+	viewportHeight := max(1, size.Height-headerHeight-inputHeight)
 	if !m.ready {
 		m.viewport = viewport.New(viewportWidth, viewportHeight)
 		m.ready = true

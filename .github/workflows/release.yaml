@@ -106,4 +106,6 @@ jobs:
           binary_name: "bililive"
           release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           overwrite: true
-          extra_files: LICENSE README.MD config.toml start.bat
+          # 程序在启动时自行把控制台输出代码页切换为 UTF-8，直接运行 exe 即可，
+          # 不再需要 start.bat 启动脚本。
+          extra_files: LICENSE README.MD config.toml

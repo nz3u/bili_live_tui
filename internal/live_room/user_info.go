@@ -5,20 +5,61 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shr-go/bili_live_tui/api"
-	"github.com/skip2/go-qrcode"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/shr-go/bili_live_tui/api"
+	"github.com/shr-go/bili_live_tui/pkg/logging"
+	"github.com/skip2/go-qrcode"
 )
 
 var (
 	QRCodeGenerateErr = errors.New("QRCode generate error")
 	PollLoginError    = errors.New("poll login failed")
 )
+
+// loginImageName is the QR image the login screen tells the user to scan.
+const loginImageName = "login.png"
+
+// qrImageDir resolves where login.png is written. The login screen promises a
+// file in the software directory, so the directory of the running executable is
+// preferred. Writing to the current working directory (the previous behaviour)
+// only worked because start.bat pinned the working directory to the release
+// folder; a directly launched binary may start anywhere, which made the
+// advertised file appear in the wrong place or not at all.
+//
+// It is a variable so tests can point it at a temporary directory.
+var qrImageDir = func() string {
+	if exe, err := os.Executable(); err == nil {
+		if dir := filepath.Dir(exe); dir != "" {
+			return dir
+		}
+	}
+	if dir, err := os.Getwd(); err == nil {
+		return dir
+	}
+	return "."
+}
+
+// writeLoginQRImage stores the QR code beside the executable and reports the
+// absolute path. A failure is returned so the UI can say the file is missing
+// instead of silently promising a file nobody can find.
+func writeLoginQRImage(q *qrcode.QRCode, dir string) (string, error) {
+	path := filepath.Join(dir, loginImageName)
+	if err := q.WriteFile(256, path); err != nil {
+		return "", err
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute, nil
+	}
+	return path, nil
+}
 
 func QRCodeLogin(client *http.Client) (data *api.QRCodeLoginData, err error) {
 	baseURL := "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
@@ -40,13 +81,19 @@ func QRCodeLogin(client *http.Client) (data *api.QRCodeLoginData, err error) {
 	if err != nil {
 		return
 	}
-	q.WriteFile(256, "login.png")
-	qrStr := q.ToSmallString(false)
 	data = &api.QRCodeLoginData{
-		QRString: qrStr,
+		QRString: q.ToSmallString(false),
 		QRKey:    respData.Data.QrcodeKey,
 		Status:   api.QRLoginNotScan,
 	}
+	// The on-screen QR code is the primary path; the file is a fallback for
+	// terminals that cannot draw it, so a write failure must not abort login.
+	path, imageErr := writeLoginQRImage(q, qrImageDir())
+	if imageErr != nil {
+		logging.Warnf("write login qrcode image failed, err=%v", imageErr)
+		return
+	}
+	data.QRImagePath = path
 	return
 }
 

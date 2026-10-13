@@ -3,8 +3,6 @@ package tui
 import (
 	"container/list"
 	"fmt"
-	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -12,8 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/truncate"
 	"github.com/shr-go/bili_live_tui/api"
-	"golang.org/x/term"
 )
 
 type sessionState uint
@@ -81,10 +79,24 @@ func InitialModel(room *api.LiveRoom) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return waitRoom(m.room)
+	return tea.Batch(waitRoom(m.room), pollTerminal())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if poll, ok := msg.(terminalPoll); ok {
+		if poll.width > 0 && poll.height > 0 && (poll.width != m.width || poll.height != m.height) {
+			next, cmd := m.Update(tea.WindowSizeMsg{Width: poll.width, Height: poll.height})
+			return next, tea.Batch(cmd, pollTerminal())
+		}
+		return m, pollTerminal()
+	}
+	next, cmd := m.update(msg)
+	result := next.(model)
+	result.layoutInputs()
+	return result, cmd
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		cmd  tea.Cmd
 		cmds []tea.Cmd
@@ -122,6 +134,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case settingsMessage:
+		if m.settings != msg.form || m.settings == nil {
+			return m, nil
+		}
+		field := &m.settings.fields[msg.field]
+		*field, cmd = field.Update(msg.message)
+		return m, settingsCommand(m.settings, msg.field, cmd)
 	case roomOpened:
 		return m.finishSwitch(msg)
 	case roomEvent:
@@ -141,6 +160,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.viewport.Width = max(1, msg.Width-2*focusMarginWidth)
 		headerHeight := lipgloss.Height(m.headerView()) + focusMarginHeight
 		footerHeight := lipgloss.Height(m.footerView()) + lipgloss.Height(m.textInput.View()) + 3*focusMarginHeight
 		verticalMarginHeight := headerHeight + footerHeight
@@ -192,6 +212,9 @@ func (m model) View() string {
 	if !m.ready {
 		return "\nInitializing..."
 	}
+	if m.width < 10 || m.height < 8 {
+		return boundedView(m.inputLine(), m.width, m.height)
+	}
 	var s string
 	content := m.viewport.View()
 	if m.settings != nil {
@@ -204,36 +227,21 @@ func (m model) View() string {
 	} else {
 		s = lipgloss.JoinVertical(lipgloss.Left, unFocusedStyle.Render(contentStr), focusedStyle.Render(textStr))
 	}
-	return s
+	return boundedView(s, m.width, m.height)
 }
 
-func PoolWindowSize(program *tea.Program, done <-chan struct{}) {
-	if runtime.GOOS != "windows" {
-		return
+func boundedView(s string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
 	}
-	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-		}
-		nowWidth, nowHeight, err := term.GetSize(int(os.Stdout.Fd()))
-		if err != nil || nowWidth <= 0 || nowHeight <= 0 {
-			continue
-		}
-		if width != nowWidth || height != nowHeight {
-			width = nowWidth
-			height = nowHeight
-			windowSize := tea.WindowSizeMsg{
-				Width:  width,
-				Height: height,
-			}
-			program.Send(windowSize)
-		}
+	lines := strings.Split(s, "\n")
+	if len(lines) > height {
+		lines = lines[len(lines)-height:]
 	}
+	for i, line := range lines {
+		lines[i] = truncate.StringWithTail(line, uint(width), "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) headerView() string {
@@ -262,6 +270,11 @@ func (m model) headerView() string {
 		}
 	}
 
+	header = singleLine(header)
+	if m.viewport.Width < 5 {
+		return truncate.StringWithTail(header, uint(max(0, m.viewport.Width)), "")
+	}
+	header = truncate.StringWithTail(header, uint(m.viewport.Width-4), "…")
 	title := lipgloss.NewStyle().BorderStyle(b).Padding(0, 1).
 		Render(header)
 	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(title)))

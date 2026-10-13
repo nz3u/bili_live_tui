@@ -10,9 +10,11 @@
 
 # 如何使用
 ## 配置文件
-目前配置文件比较简单，只有两个设置选项
+按 F2 在程序内编辑配置，Ctrl+S 保存，Esc 取消。支持默认直播间、直播间列表、缓存条数、显示选项和 User-Agent。默认直播间下次启动生效，列表和显示选项保存后生效，User-Agent 下次连接生效。
+保存保留未知配置和注释；如果文件被外部修改，会拒绝覆盖，请重启后再修改。
 ```toml
-room_id = 7777 # 想登录的直播间ID
+room_id = 7777 # 默认直播间ID
+room_ids = [7777, 3] # Alt+N 循环切换；默认房间缺席时自动加入首位
 chat_buffer = 200 # 可以回滚多少条弹幕
 ```
 
@@ -24,7 +26,7 @@ chat_buffer = 200 # 可以回滚多少条弹幕
 ```shell
 PowerShell -Command "& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8};.\bililive.exe"
 ```
-或者直接运行release内的start.bat
+本地构建目录附带 `start.bat`；也可在 Windows Terminal 中先执行 `chcp 65001` 再运行 `bililive.exe`。请在包含配置文件的目录中启动。
 
 ## 登录
 直接扫描二维码即可。
@@ -32,7 +34,19 @@ PowerShell -Command "& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8};.
 
 ## 操作方式
 按`tab`切换区域，在上方弹幕区域可以用上下左右或者类vim的方式或这直接鼠标滚轮移动
-在下方区域则可以输入弹幕按回车发送
+在下方区域则可以输入弹幕按回车发送。发送失败保留草稿，网络结果不明时请先确认是否已经发送，程序不会自动重发。
+
+- `Alt+N`：切换到列表中的下一个直播间，分别保留已收消息及草稿。发送中或切换中暂不重复切换；切换失败保留原房间。离开的房间不会继续收消息。
+- `F2`：打开设置；`Tab` / `↑↓` 选择字段，布尔选项用空格切换；`Ctrl+S` 保存，`Esc` 取消。
+- 快捷键和状态复用原输入行，不增加常驻提示行。
+
+## 开发验证
+```shell
+go test ./... -count=1 -timeout=120s
+go vet ./...
+go build -o dist/bililive.exe ./cmd/tui
+```
+测试使用本地模拟服务，不登录或发送真实弹幕。真实登录、风控、拔网恢复和 Windows 键盘行为需手工验收。
 
 # 计划实现的功能
 - 显示高能榜

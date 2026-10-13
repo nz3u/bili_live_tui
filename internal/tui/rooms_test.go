@@ -119,7 +119,7 @@ func TestClosedRoomDoesNotResubscribe(t *testing.T) {
 	close(room.MessageChan)
 	m := InitialModel(room)
 	defer m.Close()
-	event := m.Init()()
+	event := waitRoom(room)()
 	_, cmd := m.Update(event)
 	if cmd != nil {
 		t.Fatal("closed channel busy loop")

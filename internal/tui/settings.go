@@ -111,6 +111,7 @@ func (s *settingsModel) view(width, height int) string {
 		// Narrow terminals prioritize the selected value over the label.
 		label = truncate.StringWithTail(label, uint(max(0, width/2-2)), "…")
 		ti.Width = max(1, width-lipgloss.Width(prefix+label)-1)
+		ti.SetCursor(ti.Cursor())
 		value := ti.View()
 		if isBooleanSetting(i) {
 			value = "[ ]"
@@ -166,6 +167,7 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 	default:
-		return m, m.settings.update(key)
+		cmd := m.settings.update(key)
+		return m, settingsCommand(m.settings, m.settings.selected, cmd)
 	}
 }

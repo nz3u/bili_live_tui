@@ -104,13 +104,18 @@ func (m *loginModel) enterRoom() tea.Cmd {
 
 func (m *loginModel) Init() tea.Cmd {
 	if m.step == loginStepLoginSuccess {
-		return m.enterRoom()
+		return tea.Batch(m.enterRoom(), pollTerminal())
 	}
-	return nil
+	return pollTerminal()
 }
 
 func (m *loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case terminalPoll:
+		if msg.width > 0 && msg.height > 0 {
+			windowWidth, windowHeight = msg.width, msg.height
+		}
+		return m, pollTerminal()
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			m.quit = true

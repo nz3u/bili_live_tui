@@ -56,6 +56,11 @@ func generateFakeDanmuMsg(content string) (danmu *danmuMsg) {
 
 func generateDanmuMsg(content string, room *api.LiveRoom) (danmu *api.SendMsgReq) {
 	property := room.RoomUserInfo
+	if property == nil {
+		property = &api.UserRoomProperty{}
+		property.Danmu.Color = 16777215
+		property.Danmu.Mode = 1
+	}
 	return &api.SendMsgReq{
 		Bubble:    property.Bubble,
 		Msg:       content,

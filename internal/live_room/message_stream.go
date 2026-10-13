@@ -2,376 +2,321 @@ package live_room
 
 import (
 	"bytes"
-	"compress/gzip"
 	"compress/zlib"
-	"container/list"
+	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
-	"reflect"
 	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"github.com/google/go-querystring/query"
 	"github.com/shr-go/bili_live_tui/api"
-	"github.com/shr-go/bili_live_tui/pkg/logging"
 )
 
-var (
-	invalidMessageErr    = errors.New("message invalid")
-	headerNotCompleteErr = errors.New("header not complete")
+const (
+	maxFrame   = 4 << 20
+	maxDecoded = 16 << 20
+	maxDepth   = 4
+	ioTimeout  = 10 * time.Second
 )
 
-func packMessage(data []byte, protoVer api.DanmuProtol, protoOp api.DanmuOp, seq uint32) []byte {
-	b := bytes.Buffer{}
-	length := uint32(16 + len(data))
-	binary.Write(&b, binary.BigEndian, length)
-	binary.Write(&b, binary.BigEndian, uint16(16))
-	binary.Write(&b, binary.BigEndian, uint16(protoVer))
-	binary.Write(&b, binary.BigEndian, uint32(protoOp))
-	binary.Write(&b, binary.BigEndian, seq)
+var invalidMessageErr = errors.New("invalid message")
 
-	if len(data) > 0 {
-		switch protoVer {
-		case api.DanmuProtolNormalZlib:
-			w := zlib.NewWriter(&b)
-			w.Write(data)
-			w.Close()
-		case api.DanmuProtolNormalBrotli:
-			w := brotli.NewWriter(&b)
-			w.Write(data)
-			w.Close()
-		default:
-			b.Write(data)
+func packMessage(data []byte, proto api.DanmuProtol, op api.DanmuOp, seq uint32) []byte {
+	var b bytes.Buffer
+	switch proto {
+	case api.DanmuProtolNormalZlib:
+		w := zlib.NewWriter(&b)
+		_, _ = w.Write(data)
+		_ = w.Close()
+		data = b.Bytes()
+	case api.DanmuProtolNormalBrotli:
+		w := brotli.NewWriter(&b)
+		_, _ = w.Write(data)
+		_ = w.Close()
+		data = b.Bytes()
+	}
+	p := make([]byte, 16+len(data))
+	binary.BigEndian.PutUint32(p, uint32(len(p)))
+	binary.BigEndian.PutUint16(p[4:], 16)
+	binary.BigEndian.PutUint16(p[6:], uint16(proto))
+	binary.BigEndian.PutUint32(p[8:], uint32(op))
+	binary.BigEndian.PutUint32(p[12:], seq)
+	copy(p[16:], data)
+	return p
+}
+func parseHeader(p []byte) (*api.DanmuMessageHeader, error) {
+	if len(p) < 16 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	h := &api.DanmuMessageHeader{Size: binary.BigEndian.Uint32(p), HeaderSize: binary.BigEndian.Uint16(p[4:]), ProtoVer: api.DanmuProtol(binary.BigEndian.Uint16(p[6:])), OpCode: api.DanmuOp(binary.BigEndian.Uint32(p[8:])), Sequence: binary.BigEndian.Uint32(p[12:])}
+	if h.HeaderSize != 16 || h.Size < 16 || h.Size > maxFrame || h.ProtoVer > 3 {
+		return nil, invalidMessageErr
+	}
+	return h, nil
+}
+func readFrame(c net.Conn, timeout time.Duration) ([]byte, error) {
+	if err := c.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	p := make([]byte, 16)
+	if _, err := io.ReadFull(c, p); err != nil {
+		return nil, err
+	}
+	h, err := parseHeader(p)
+	if err != nil {
+		return nil, err
+	}
+	p = append(p, make([]byte, int(h.Size)-16)...)
+	_, err = io.ReadFull(c, p[16:])
+	return p, err
+}
+func writeFrame(c net.Conn, p []byte) error {
+	if len(p) > maxFrame {
+		return invalidMessageErr
+	}
+	if err := c.SetWriteDeadline(time.Now().Add(ioTimeout)); err != nil {
+		return err
+	}
+	for len(p) > 0 {
+		n, err := c.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
+}
+func decodeMessages(ctx context.Context, room *api.LiveRoom, p []byte, depth int, budget *int) error {
+	if depth > maxDepth {
+		return invalidMessageErr
+	}
+	for len(p) > 0 {
+		h, err := parseHeader(p)
+		if err != nil {
+			return err
+		}
+		if int(h.Size) > len(p) {
+			return io.ErrUnexpectedEOF
+		}
+		body := p[16:h.Size]
+		p = p[h.Size:]
+		if h.ProtoVer == 2 || h.ProtoVer == 3 {
+			var reader io.Reader
+			if h.ProtoVer == 2 {
+				z, err := zlib.NewReader(bytes.NewReader(body))
+				if err != nil {
+					return err
+				}
+				defer z.Close()
+				reader = z
+			} else {
+				reader = brotli.NewReader(bytes.NewReader(body))
+			}
+			decoded, err := io.ReadAll(io.LimitReader(reader, int64(*budget)+1))
+			if err != nil {
+				return err
+			}
+			*budget -= len(decoded)
+			if *budget < 0 {
+				return invalidMessageErr
+			}
+			if err := decodeMessages(ctx, room, decoded, depth+1, budget); err != nil {
+				return err
+			}
+			continue
+		}
+		switch h.OpCode {
+		case api.DanmuOpHeartBeatResp:
+			if len(body) != 4 {
+				return invalidMessageErr
+			}
+			atomic.StoreUint32(&room.Hot, binary.BigEndian.Uint32(body))
+		case api.DanmuOpNormal:
+			m := new(api.DanmuMessage)
+			if err := json.Unmarshal(body, m); err != nil {
+				return err
+			}
+			select {
+			case room.MessageChan <- m:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
-	return b.Bytes()
+	return nil
+}
+func unpackMessage(room *api.LiveRoom, p []byte) uint32 {
+	budget := maxDecoded
+	ctx := room.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if decodeMessages(ctx, room, p, 0, &budget) != nil {
+		return 0
+	}
+	return uint32(len(p))
+}
+func GetDanmuInfo(client *http.Client, id uint64) (*api.DanmuInfoResp, error) {
+	return getDanmuInfo(context.Background(), client, id)
+}
+func getDanmuInfo(ctx context.Context, client *http.Client, id uint64) (*api.DanmuInfoResp, error) {
+	u, err := signURL(ctx, client, fmt.Sprintf("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?id=%d", id))
+	if err != nil {
+		return nil, err
+	}
+	var info api.DanmuInfoResp
+	if err := getJSON(ctx, client, u, &info); err != nil {
+		return nil, err
+	}
+	if info.Code != 0 {
+		return nil, fmt.Errorf("danmu info: %s", info.Message)
+	}
+	return &info, nil
+}
+func connectDanmuServer(uid, id uint64, info *api.DanmuInfoResp) (net.Conn, error) {
+	return connect(context.Background(), uid, id, info)
+}
+func connect(ctx context.Context, uid, id uint64, info *api.DanmuInfoResp) (net.Conn, error) {
+	if info == nil {
+		return nil, errors.New("missing danmu info")
+	}
+	last := errors.New("no available danmu servers")
+	for _, host := range info.Data.HostList {
+		c, err := (&net.Dialer{Timeout: ioTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(host.Host, strconv.Itoa(host.Port)))
+		if err != nil {
+			last = err
+			continue
+		}
+		stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+		payload, _ := json.Marshal(api.DanmuAuthPacketReq{UID: uid, RoomID: id, ProtoVer: 3, Platform: "web", Type: 2, Key: info.Data.Token})
+		err = writeFrame(c, packMessage(payload, 1, api.DanmuOpAuth, 1))
+		if err == nil {
+			var p []byte
+			p, err = readFrame(c, ioTimeout)
+			if err == nil {
+				h, _ := parseHeader(p)
+				var auth struct {
+					Code *int `json:"code"`
+				}
+				err = json.Unmarshal(p[16:], &auth)
+				if err == nil && (h.OpCode != api.DanmuOpAuthResp || h.ProtoVer > 1 || auth.Code == nil || *auth.Code != 0) {
+					err = errors.New("danmu authentication rejected")
+				}
+			}
+		}
+		stop()
+		if err == nil && ctx.Err() == nil {
+			return c, nil
+		}
+		_ = c.Close()
+		last = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, last
 }
 
-func parseHeader(data []byte) (header *api.DanmuMessageHeader, err error) {
-	if len(data) < 16 {
-		err = headerNotCompleteErr
-		return
+// ConnectDanmuServer is compatibility-only; AuthAndConnect also initializes metadata and credentials.
+func ConnectDanmuServer(uid, id uint64, info *api.DanmuInfoResp) (*api.LiveRoom, error) {
+	c, err := connectDanmuServer(uid, id, info)
+	if err != nil {
+		return nil, err
 	}
-	b := bytes.NewBuffer(data)
-	header = new(api.DanmuMessageHeader)
-
-	v := reflect.ValueOf(header).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		ptr := v.Field(i).Addr().Interface()
-		binary.Read(b, binary.BigEndian, ptr)
-	}
-	if header.HeaderSize != 16 ||
-		header.ProtoVer > api.DanmuProtolNormalBrotli ||
-		header.OpCode > api.DanmuOpAuthResp {
-		err = invalidMessageErr
-		return
-	}
-	return
+	room := api.NewLiveRoom()
+	room.UID = uid
+	room.RoomID = id
+	room.Client = http.DefaultClient
+	go supervise(room, c)
+	return room, nil
 }
-
-func unpackMessage(room *api.LiveRoom, data []byte) (unpack uint32) {
-	for dataLen := len(data); dataLen > 0; dataLen = len(data) {
-		header, _ := parseHeader(data)
-		if header == nil || (header.Size) > uint32(dataLen) {
+func generation(room *api.LiveRoom, c net.Conn) {
+	ctx, cancel := context.WithCancel(room.Context())
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer cancel()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		heartbeat := func() error {
+			return writeFrame(c, packMessage([]byte("[object Object]"), 1, api.DanmuOpHeartBeat, atomic.AddUint32(&room.Seq, 1)))
+		}
+		if heartbeat() != nil {
 			return
 		}
-		unpack += header.Size
-		rawMessage := data[header.HeaderSize:header.Size]
-		data = data[header.Size:]
-		logging.Debugf("read message, header=%+v", header)
-		var normalMessage []byte
-		switch header.ProtoVer {
-		case api.DanmuProtolNormalZlib:
-			b := bytes.NewBuffer(rawMessage)
-			if zr, err := gzip.NewReader(b); err != nil {
-				logging.Errorf("decompress gzip error, err=%v", err)
-				continue
-			} else {
-				if normalMessage, err = ioutil.ReadAll(zr); err != nil {
-					logging.Errorf("decompress gzip error, err=%v", err)
-					continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if heartbeat() != nil {
+					return
 				}
-			}
-		case api.DanmuProtolNormalBrotli:
-			b := bytes.NewBuffer(rawMessage)
-			br := brotli.NewReader(b)
-			var err error
-			if normalMessage, err = ioutil.ReadAll(br); err != nil {
-				logging.Errorf("decompress brotli error, err=%v", err)
-				continue
-			}
-		default:
-			normalMessage = rawMessage
-		}
-		logging.Debugf("read message, header=%+v", header)
-		switch header.OpCode {
-		case api.DanmuOpHeartBeatResp:
-			if len(normalMessage) >= 4 {
-				room.Hot = binary.BigEndian.Uint32(normalMessage)
-			}
-		case api.DanmuOpNormal:
-			if header.ProtoVer == api.DanmuProtolNormal {
-				danmuMessage := new(api.DanmuMessage)
-				if err := json.Unmarshal(normalMessage, danmuMessage); err != nil {
-					logging.Errorf("unmarshal normal message error, err=%v", err)
-					continue
-				}
-				room.MessageChan <- danmuMessage
-			} else if header.ProtoVer == api.DanmuProtolNormalZlib || header.ProtoVer == api.DanmuProtolNormalBrotli {
-				for messagesLen := len(normalMessage); messagesLen > 0; messagesLen = len(normalMessage) {
-					messageHeader, err := parseHeader(normalMessage)
-					if err != nil {
-						logging.Errorf("parse message error, err=%v", err)
-						break
-					} else if messageHeader.Size > uint32(messagesLen) {
-						logging.Errorf("header message size overflow")
-						break
-					}
-					oneNormalMessage := normalMessage[messageHeader.HeaderSize:messageHeader.Size]
-					normalMessage = normalMessage[messageHeader.Size:]
-					danmuMessage := new(api.DanmuMessage)
-					if err := json.Unmarshal(oneNormalMessage, danmuMessage); err != nil {
-						logging.Errorf("unmarshal normal message error, err=%v", err)
-						continue
-					}
-					room.MessageChan <- danmuMessage
+			case p, ok := <-room.ReqChan:
+				if !ok || writeFrame(c, p) != nil {
+					return
 				}
 			}
 		}
-	}
-	return
-}
-
-func GetDanmuInfo(client *http.Client, id uint64) (info *api.DanmuInfoResp, err error) {
-	danmuInfoReq := api.DanmuInfoReq{ID: id}
-	v, err := query.Values(danmuInfoReq)
-	if err != nil {
-		return
-	}
-	baseURL := "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
-	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-
-	signedUrl, err := signAndGenerateURL(realUrl)
-	if err != nil {
-		return
-	}
-
-	resp, err := client.Get(signedUrl)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	danmuInfoResp := new(api.DanmuInfoResp)
-	err = json.Unmarshal(body, danmuInfoResp)
-	if err != nil {
-		return
-	}
-	if danmuInfoResp.Code != 0 {
-		err = errors.New(danmuInfoResp.Message)
-	}
-	info = danmuInfoResp
-	return
-}
-
-func connectDanmuServer(uid uint64, roomID uint64, info *api.DanmuInfoResp) (conn net.Conn, err error) {
-	for _, HostData := range info.Data.HostList {
-		timeout := time.Second
-		conn, err = net.DialTimeout("tcp", net.JoinHostPort(HostData.Host, strconv.Itoa(HostData.Port)), timeout)
-		if err == nil && conn != nil {
+	}()
+	for {
+		p, err := readFrame(c, 75*time.Second)
+		if err != nil {
+			break
+		}
+		budget := maxDecoded
+		if decodeMessages(ctx, room, p, 0, &budget) != nil {
 			break
 		}
 	}
-	if conn == nil {
-		return nil, errors.New("no server can connect")
-	}
-	danmuAuthPacketReq := api.DanmuAuthPacketReq{
-		UID:      uid,
-		RoomID:   roomID,
-		ProtoVer: 3,
-		Platform: "web",
-		Type:     2,
-		Key:      info.Data.Token,
-	}
-	jsonReq, err := json.Marshal(danmuAuthPacketReq)
-	if err != nil {
-		return
-	}
-	data := packMessage(jsonReq, api.DanmuProtolHeartBeat, api.DanmuOpAuth, 1)
-	dataLen := len(data)
-	n, err := conn.Write(data)
-	if err != nil {
-		return
-	} else if n != dataLen {
-		err = errors.New("connect server failed")
-		return
-	}
-	resp := make([]byte, 8192)
-	n, err = conn.Read(resp)
-	if err != nil {
-		return
-	}
-	danmuHeader, _ := parseHeader(resp)
-	if danmuHeader == nil {
-		err = errors.New("parse header failed")
-		return
-	}
-	danmuAuthPacketResp := api.DanmuAuthPacketResp{}
-	err = json.Unmarshal(resp[danmuHeader.HeaderSize:n], &danmuAuthPacketResp)
-	if err != nil || danmuAuthPacketResp.Code != 0 {
-		err = errors.New("connect server auth failed")
-		return
-	}
-	return
+	cancel()
+	_ = c.Close()
+	<-writerDone
+	stop()
 }
-
-func ConnectDanmuServer(uid uint64, roomID uint64, info *api.DanmuInfoResp) (room *api.LiveRoom, err error) {
-	conn, err := connectDanmuServer(uid, roomID, info)
-	if err != nil {
-		return
-	}
-	room = &api.LiveRoom{
-		UID:         uid,
-		RoomID:      roomID,
-		Hot:         0,
-		Seq:         1,
-		MessageChan: make(chan *api.DanmuMessage, 10),
-		ReqChan:     make(chan []byte, 10),
-		DoneChan:    make(chan struct{}),
-		RetryChan:   make(chan struct{}),
-		StreamConn:  conn,
-	}
-
-	// process write
-	go processWrite(room)
-
-	// process read
-	go processRead(room)
-
-	go monitorConn(room)
-
-	return
-}
-
-func heartBeatReq(room *api.LiveRoom) {
-	body, _ := hex.DecodeString("5b6f626a656374204f626a6563745d")
-	seq := atomic.AddUint32(&room.Seq, 1)
-	data := packMessage(body, api.DanmuProtolHeartBeat, api.DanmuOpHeartBeat, seq)
-	room.ReqChan <- data
-}
-
-func processWrite(room *api.LiveRoom) {
-	heartBeatReq(room)
-	heartBeatTicker := time.NewTicker(30 * time.Second)
-	defer heartBeatTicker.Stop()
-	dataList := list.New()
-	doneChan := room.DoneChan
-Loop:
-	for {
-		select {
-		case <-doneChan:
-			break Loop
-		case <-heartBeatTicker.C:
-			heartBeatReq(room)
-		case data := <-room.ReqChan:
-			for dataList.Len() > 0 {
-				preData := dataList.Front().Value.([]byte)
-				// todo Add timeout settings
-				if _, err := room.StreamConn.Write(preData); err != nil {
-					if err != nil {
-						logging.Errorf("connection close from write, err=%v", err)
-						break Loop
-					}
-				} else {
-					dataList.Remove(dataList.Front())
-				}
-			}
-			if dataList.Len() == 0 {
-				_, err := room.StreamConn.Write(data)
-				if err == nil {
-					continue
-				}
-			}
-			dataList.PushBack(data)
+func supervise(room *api.LiveRoom, c net.Conn) {
+	defer room.Finish()
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		if room.RoomUserInfo != nil {
+			processHeartBeat(room)
 		}
-	}
-	logging.Infof("write goroutine quit")
-}
-
-func processRead(room *api.LiveRoom) {
-	var notComplete []byte
-	doneChan := room.DoneChan
-Loop:
+	}()
+	defer func() { <-hbDone }()
+	delay := 250 * time.Millisecond
 	for {
-		select {
-		case <-doneChan:
-			break Loop
-		default:
-			data := make([]byte, 64*1024)
-			// todo Add timeout settings
-			n, err := room.StreamConn.Read(data)
-			if err != nil {
-				close(room.RetryChan)
-				logging.Errorf("connection close from read, err=%v", err)
-				break Loop
-			}
-			data = data[:n]
-			if len(notComplete) != 0 {
-				data = append(notComplete, data...)
-			}
-			dataLen := len(data)
-			if dataLen > 0 {
-				unpackLen := unpackMessage(room, data)
-				leftLen := dataLen - int(unpackLen)
-				if leftLen > 0 {
-					notComplete = data[unpackLen:]
-				} else {
-					notComplete = nil
-				}
-			}
+		if c != nil {
+			generation(room, c)
+			c = nil
 		}
-	}
-	logging.Infof("read goroutine quit")
-}
-
-func monitorConn(room *api.LiveRoom) {
-Loop:
-	for {
 		select {
 		case <-room.DoneChan:
-			break Loop
-		case <-room.RetryChan:
-			logging.Infof("retry connect danmu server")
-			close(room.DoneChan)
-			client := room.Client
-			realRoomID := room.RoomID
-			info, err := GetDanmuInfo(client, realRoomID)
-			if err != nil {
-				logging.Fatalf("retry get danmu info failed, err=%v", err)
+			return
+		case <-time.After(delay):
+		}
+		info, err := getDanmuInfo(room.Context(), room.Client, room.RoomID)
+		if err == nil {
+			c, err = connect(room.Context(), room.UID, room.RoomID, info)
+		}
+		if err != nil {
+			delay *= 2
+			if delay > 8*time.Second {
+				delay = 8 * time.Second
 			}
-			conn, err := connectDanmuServer(room.UID, realRoomID, info)
-			if err != nil {
-				logging.Fatalf("retry connect danmu server failed, err=%v", err)
-			}
-			logging.Infof("retry connect danmu server success")
-			room.StreamConn = conn
-			room.DoneChan = make(chan struct{})
-			room.RetryChan = make(chan struct{})
-			go processWrite(room)
-			go processRead(room)
+		} else {
+			delay = 250 * time.Millisecond
 		}
 	}
-	logging.Infof("monitor goroutine quit")
 }

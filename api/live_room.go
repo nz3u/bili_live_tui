@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http"
+	"sync"
 )
 
 type LiveRoom struct {
@@ -21,6 +23,42 @@ type LiveRoom struct {
 	RoomUserInfo *UserRoomProperty
 	Client       *http.Client
 	CSRF         string
+	closeOnce    sync.Once
+	ctx          context.Context
+	cancel       context.CancelFunc
+	finished     chan struct{}
+}
+
+// NewLiveRoom initializes lifetime state before any workers start.
+func NewLiveRoom() *LiveRoom {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &LiveRoom{DoneChan: make(chan struct{}), MessageChan: make(chan *DanmuMessage, 64), ReqChan: make(chan []byte, 10), ctx: ctx, cancel: cancel, finished: make(chan struct{})}
+}
+
+func (r *LiveRoom) Context() context.Context { return r.ctx }
+
+// Close cancels the lifetime and waits for all workers. Call Close, never close DoneChan directly.
+func (r *LiveRoom) Close() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		if r.DoneChan != nil {
+			close(r.DoneChan)
+		}
+	})
+	if r.finished != nil {
+		<-r.finished
+	}
+}
+
+// Finish is called once by the connection supervisor after joining all workers.
+func (r *LiveRoom) Finish() {
+	close(r.MessageChan)
+	close(r.finished)
 }
 
 type DanmuInfoReq struct {

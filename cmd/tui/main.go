@@ -8,12 +8,18 @@ import (
 )
 
 func main() {
+	logging.InitLogConfig()
+	defer logging.Cleanup()
+	if err := tui.LoadConfig("config.toml"); err != nil {
+		logging.Fatalf("%v", err)
+	}
 	logging.Infof("tui start")
 	client := tui.GetCustomHttpClient()
 	room, err := tui.PrepareEnterRoom(client)
 	if err != nil || room == nil {
 		logging.Fatalf("Connect server error, err=%v", err)
 	}
+	defer room.Close()
 	p := tea.NewProgram(tui.InitialModel(room), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	go tui.ReceiveMsg(p, room)
 	go tui.PoolWindowSize(p)

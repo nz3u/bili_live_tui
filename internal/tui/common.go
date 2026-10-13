@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"github.com/BurntSushi/toml"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/shr-go/bili_live_tui/api"
@@ -9,6 +10,7 @@ import (
 	"golang.org/x/term"
 	"net/http"
 	"os"
+	"time"
 )
 
 var (
@@ -17,14 +19,18 @@ var (
 	LiveConfig   api.BiliLiveConfig
 )
 
-func init() {
-	logging.InitLogConfig()
+// LoadConfig is explicit so importing the UI never reads files or exits tests.
+func LoadConfig(path string) error {
 	windowWidth, windowHeight, _ = term.GetSize(int(os.Stdout.Fd()))
-	f := "config.toml"
-	_, err := toml.DecodeFile(f, &LiveConfig)
-	if err != nil {
-		logging.Fatalf("load config error, err=%v", err)
+	var cfg api.BiliLiveConfig
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
+	if cfg.RoomID == 0 || cfg.ChatBuffer <= 0 {
+		return fmt.Errorf("room_id and chat_buffer must be positive")
+	}
+	LiveConfig = cfg
+	return nil
 }
 
 type userAgentTransport struct {
@@ -33,8 +39,9 @@ type userAgentTransport struct {
 }
 
 func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("User-Agent", t.ua)
-	return t.rt.RoundTrip(req)
+	clone := req.Clone(req.Context())
+	clone.Header.Set("User-Agent", t.ua)
+	return t.rt.RoundTrip(clone)
 }
 
 func GetCustomHttpClient() (client *http.Client) {
@@ -48,6 +55,7 @@ func GetCustomHttpClient() (client *http.Client) {
 	}
 	return &http.Client{
 		Transport: transport,
+		Timeout:   15 * time.Second,
 	}
 }
 

@@ -1,70 +1,33 @@
 package live_room
 
 import (
-	"encoding/json"
-	"errors"
+	"context"
 	"fmt"
-	"github.com/google/go-querystring/query"
 	"github.com/shr-go/bili_live_tui/api"
-	"io"
 	"net/http"
 )
 
-func GetRoomInfo(client *http.Client, roomID uint64) (info *api.RoomInfoResp, err error) {
-	roomInfoReq := api.RoomInfoReq{RoomID: roomID}
-	v, err := query.Values(roomInfoReq)
+func GetRoomInfo(client *http.Client, id uint64) (*api.RoomInfoResp, error) {
+	var info api.RoomInfoResp
+	err := getJSON(context.Background(), client, fmt.Sprintf("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=%d", id), &info)
 	if err != nil {
-		return
+		return nil, err
 	}
-	baseURL := "https://api.live.bilibili.com/room/v1/Room/get_info"
-	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-	resp, err := client.Get(realUrl)
-	if err != nil {
-		return
+	if info.Code != 0 {
+		return nil, fmt.Errorf("room info: %s", info.Message)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	roomInfoResp := new(api.RoomInfoResp)
-	err = json.Unmarshal(body, roomInfoResp)
-	if err != nil {
-		return
-	}
-	if roomInfoResp.Code != 0 {
-		err = errors.New(roomInfoResp.Message)
-	}
-	info = roomInfoResp
-	return
+	return &info, nil
 }
 
-//GetUserRoomInfo this function trigger user enter room event
-func GetUserRoomInfo(client *http.Client, roomID uint64) (info *api.UserRoomInfo, err error) {
-	roomInfoReq := api.RoomInfoReq{RoomID: roomID}
-	v, err := query.Values(roomInfoReq)
+// GetUserRoomInfo also triggers the user-enter-room event.
+func GetUserRoomInfo(client *http.Client, id uint64) (*api.UserRoomInfo, error) {
+	var info api.UserRoomInfo
+	err := getJSON(context.Background(), client, fmt.Sprintf("https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByUser?room_id=%d", id), &info)
 	if err != nil {
-		return
+		return nil, err
 	}
-	baseURL := "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByUser"
-	realUrl := fmt.Sprintf("%s?%s", baseURL, v.Encode())
-	resp, err := client.Get(realUrl)
-	if err != nil {
-		return
+	if info.Code != 0 {
+		return nil, fmt.Errorf("user room info: %s", info.Message)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	userRoomInfo := new(api.UserRoomInfo)
-	err = json.Unmarshal(body, userRoomInfo)
-	if err != nil {
-		return
-	}
-	if userRoomInfo.Code != 0 {
-		err = errors.New(userRoomInfo.Message)
-	}
-	info = userRoomInfo
-	return
+	return &info, nil
 }

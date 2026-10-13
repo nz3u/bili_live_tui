@@ -1,13 +1,13 @@
 package live_room
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/shr-go/bili_live_tui/api"
 	"github.com/skip2/go-qrcode"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -21,12 +21,12 @@ var (
 
 func QRCodeLogin(client *http.Client) (data *api.QRCodeLoginData, err error) {
 	baseURL := "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
-	resp, err := client.Get(baseURL)
+	resp, err := boundedClient(client).Get(baseURL)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFrame+1))
 	if err != nil {
 		return
 	}
@@ -52,12 +52,12 @@ func QRCodeLogin(client *http.Client) (data *api.QRCodeLoginData, err error) {
 func PollLogin(client *http.Client, data *api.QRCodeLoginData) (cookie string, err error) {
 	baseURL := "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 	realURL := fmt.Sprintf("%s?qrcode_key=%s", baseURL, data.QRKey)
-	resp, err := client.Get(realURL)
+	resp, err := boundedClient(client).Get(realURL)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFrame+1))
 	if err != nil {
 		return
 	}
@@ -85,22 +85,27 @@ func PollLogin(client *http.Client, data *api.QRCodeLoginData) (cookie string, e
 }
 
 func parseCookieStr(client *http.Client, cookies string) {
-	defer func() {
-		recover()
-	}()
+	if client == nil {
+		return
+	}
 	jar, _ := cookiejar.New(nil)
 	elements := strings.Split(cookies, ";")
 	var cookieSlice []*http.Cookie
 	for _, element := range elements {
 		element := strings.TrimSpace(element)
-		nameValue := strings.Split(element, "=")
+		nameValue := strings.SplitN(element, "=", 2)
+		if len(nameValue) != 2 || strings.TrimSpace(nameValue[0]) == "" {
+			continue
+		}
 		cookie := &http.Cookie{
 			Name:   nameValue[0],
 			Value:  nameValue[1],
 			Path:   "/",
 			Domain: ".bilibili.com",
 		}
-		cookieSlice = append(cookieSlice, cookie)
+		if cookie.Valid() == nil {
+			cookieSlice = append(cookieSlice, cookie)
+		}
 	}
 	u, _ := url.Parse("https://bilibili.com")
 	jar.SetCookies(u, cookieSlice)
@@ -108,7 +113,7 @@ func parseCookieStr(client *http.Client, cookies string) {
 }
 
 func CheckCookieValid(client *http.Client, cookie string) bool {
-	if cookie == "" {
+	if client == nil || strings.TrimSpace(cookie) == "" {
 		return false
 	}
 	parseCookieStr(client, cookie)
@@ -116,44 +121,25 @@ func CheckCookieValid(client *http.Client, cookie string) bool {
 }
 
 func CheckAuth(client *http.Client) bool {
-	baseURL := "https://account.bilibili.com/site/getCoin"
-	resp, err := client.Get(baseURL)
-	if err != nil {
-		return false
+	var data struct {
+		Code *int `json:"code"`
 	}
-
-	defer resp.Body.Close()
-	respBody, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return false
-	}
-	var data map[string]interface{}
-	if err = json.Unmarshal(respBody, &data); err != nil {
-		return false
-	}
-	return data["code"].(float64) == 0
+	return getJSON(context.Background(), client, "https://account.bilibili.com/site/getCoin", &data) == nil && data.Code != nil && *data.Code == 0
 }
 
 func GetUserInfo(client *http.Client) *api.UserInfo {
-	baseURL := "https://api.bilibili.com/x/web-interface/nav"
-	resp, err := client.Get(baseURL)
-	if err != nil {
+	var info api.UserInfo
+	if err := getJSON(context.Background(), client, "https://api.bilibili.com/x/web-interface/nav", &info); err != nil || info.Code != 0 {
 		return nil
 	}
-	defer resp.Body.Close()
-	respBody, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-	var userInfo api.UserInfo
-	if err = json.Unmarshal(respBody, &userInfo); err != nil || userInfo.Code != 0 {
-		return nil
-	}
-	return &userInfo
+	return &info
 }
 
 func getCSRF(client *http.Client) string {
-	u, _ := url.Parse("https://bilibili.com")
+	if client == nil || client.Jar == nil {
+		return ""
+	}
+	u, _ := url.Parse("https://api.live.bilibili.com")
 	cookies := client.Jar.Cookies(u)
 	for _, cookie := range cookies {
 		if cookie.Name == "bili_jct" {

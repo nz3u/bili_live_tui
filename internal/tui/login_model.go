@@ -1,11 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shr-go/bili_live_tui/api"
 	"github.com/shr-go/bili_live_tui/internal/live_room"
-	"github.com/shr-go/bili_live_tui/pkg/logging"
 	"net/http"
 	"os"
 	"time"
@@ -30,6 +30,7 @@ type loginModel struct {
 	chooseLogin bool
 	localCookie bool
 	quit        bool
+	errText     string
 }
 
 func newLoginModel(client *http.Client) loginModel {
@@ -49,13 +50,26 @@ type waitScanMsg struct{}
 
 type TickMsg time.Time
 
-func (m *loginModel) loadLoginData() tea.Msg {
-	loginData, err := live_room.QRCodeLogin(m.client)
-	if err != nil {
-		logging.Fatalf("loadLoginData failed, err=%v", err)
+type loginDataMsg struct {
+	data *api.QRCodeLoginData
+	err  error
+}
+type loginPollMsg struct {
+	data    api.QRCodeLoginData
+	cookies string
+	err     error
+}
+type loginRoomMsg struct {
+	room *api.LiveRoom
+	err  error
+}
+
+func (m *loginModel) loadLoginData() tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		data, err := live_room.QRCodeLogin(client)
+		return loginDataMsg{data, err}
 	}
-	m.loginData = loginData
-	return waitScanMsg{}
 }
 
 func tickEvery() tea.Cmd {
@@ -64,41 +78,33 @@ func tickEvery() tea.Cmd {
 	})
 }
 
-func (m *loginModel) pollLoginStatus() tea.Msg {
-	cookies, err := live_room.PollLogin(m.client, m.loginData)
-	if err != nil {
-		logging.Fatalf("pollLoginStatus failed, err=%v", err)
+func (m *loginModel) pollLoginStatus() tea.Cmd {
+	client, data := m.client, *m.loginData
+	return func() tea.Msg {
+		cookies, err := live_room.PollLogin(client, &data)
+		return loginPollMsg{data, cookies, err}
 	}
-	switch m.loginData.Status {
-	case api.QRLoginExpired:
-		m.step = loginStepLoginNeedRefresh
-	case api.QRLoginSuccess:
-		m.step = loginStepLoginSuccess
-		m.cookies = cookies
-	}
-	return m.step
 }
 
-func (m *loginModel) enterRoom() tea.Msg {
-	if m.chooseLogin && !m.localCookie {
-		if !live_room.CheckCookieValid(m.client, m.cookies) {
-			logging.Fatalf("PrepareEnterRoom cookies check failed, program exit")
+func (m *loginModel) enterRoom() tea.Cmd {
+	client, cookies, saveCookie, roomID := m.client, m.cookies, m.chooseLogin && !m.localCookie, LiveConfig.RoomID
+	return func() tea.Msg {
+		if saveCookie {
+			if !live_room.CheckCookieValid(client, cookies) {
+				return loginRoomMsg{err: fmt.Errorf("登录失效，请重启后重新登录")}
+			}
+			if err := os.WriteFile("COOKIE.DAT", []byte(cookies), 0o600); err != nil {
+				return loginRoomMsg{err: fmt.Errorf("保存登录信息失败: %w", err)}
+			}
 		}
-		os.WriteFile("COOKIE.DAT", []byte(m.cookies), 0o660)
+		room, err := live_room.AuthAndConnect(client, roomID)
+		return loginRoomMsg{room, err}
 	}
-
-	if room, err := live_room.AuthAndConnect(m.client, LiveConfig.RoomID); err != nil {
-		logging.Fatalf("AuthAndConnect failed, err=%v", err)
-	} else {
-		m.room = room
-	}
-	m.step = loginStepDone
-	return m.step
 }
 
 func (m *loginModel) Init() tea.Cmd {
 	if m.step == loginStepLoginSuccess {
-		return m.enterRoom
+		return m.enterRoom()
 	}
 	return nil
 }
@@ -109,6 +115,14 @@ func (m *loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			m.quit = true
 			return m, tea.Quit
+		}
+		if m.errText != "" && msg.String() == "enter" {
+			m.errText = ""
+			if m.step == loginStepLoginSuccess {
+				return m, m.enterRoom()
+			}
+			m.step = loginStepWaitLogin
+			return m, m.loadLoginData()
 		}
 		switch m.step {
 		case loginStepConfirmLogin:
@@ -122,29 +136,61 @@ func (m *loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", " ":
 				if m.chooseLogin {
 					m.step = loginStepWaitLogin
-					return m, m.loadLoginData
+					return m, m.loadLoginData()
 				} else {
 					m.step = loginStepLoginSuccess
-					return m, m.enterRoom
+					return m, m.enterRoom()
 				}
 			}
 		case loginStepLoginNeedRefresh:
 			if msg.String() == "enter" || msg.String() == " " {
 				m.step = loginStepWaitLogin
 				m.loginData = nil
-				return m, m.loadLoginData
+				return m, m.loadLoginData()
 			}
 		}
 		return m, nil
-	case waitScanMsg:
+	case loginDataMsg:
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.loginData = msg.data
 		return m, tickEvery()
 	case TickMsg:
-		return m, m.pollLoginStatus
+		if m.loginData == nil || m.step != loginStepWaitLogin {
+			return m, nil
+		}
+		return m, m.pollLoginStatus()
+	case loginPollMsg:
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.loginData = &msg.data
+		switch msg.data.Status {
+		case api.QRLoginExpired:
+			m.step = loginStepLoginNeedRefresh
+		case api.QRLoginSuccess:
+			m.step, m.cookies = loginStepLoginSuccess, msg.cookies
+			return m, m.enterRoom()
+		default:
+			return m, tickEvery()
+		}
+	case loginRoomMsg:
+		if msg.err != nil {
+			m.errText = msg.err.Error()
+			return m, nil
+		}
+		m.room, m.step = msg.room, loginStepDone
+		return m, tea.Quit
+	case tea.WindowSizeMsg:
+		windowWidth, windowHeight = msg.Width, msg.Height
 	case loginStep:
 		if msg == loginStepWaitLogin {
 			return m, tickEvery()
 		} else if msg == loginStepLoginSuccess {
-			return m, m.enterRoom
+			return m, m.enterRoom()
 		} else if msg == loginStepDone {
 			return m, tea.Quit
 		}
@@ -153,6 +199,10 @@ func (m *loginModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *loginModel) View() string {
+	if m.errText != "" {
+		return lipgloss.Place(windowWidth, windowHeight, lipgloss.Center, lipgloss.Center,
+			dialogBoxStyle.Render(singleLine(m.errText)+" · Enter 重试 · Ctrl+C 退出"))
+	}
 	switch m.step {
 	case loginStepConfirmLogin:
 		var loginButton, cancelButton string

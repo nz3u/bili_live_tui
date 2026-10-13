@@ -74,7 +74,7 @@ jobs:
           binary_name: "bililive"
           release_tag: ${{ github.ref_name }}
           overwrite: true
-          extra_files: LICENSE README.MD config.toml
+          extra_files: LICENSE README.MD config.toml start.bat
 
   releases-win-matrix:
     name: Release Go Binary
@@ -99,4 +99,4 @@ jobs:
           binary_name: "bililive"
           release_tag: ${{ github.ref_name }}
           overwrite: true
-          extra_files: LICENSE README.MD config.toml
+          extra_files: LICENSE README.MD config.toml start.bat

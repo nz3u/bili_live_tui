@@ -13,7 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shr-go/bili_live_tui/api"
-	"github.com/shr-go/bili_live_tui/pkg/logging"
 	"golang.org/x/term"
 )
 
@@ -55,16 +54,23 @@ type model struct {
 	sendStatus string
 	width      int
 	height     int
+	roomID     uint64
+	switching  bool
+	owner      *roomOwner
+	memories   map[uint64]roomMemory
 }
 
 func InitialModel(room *api.LiveRoom) model {
 	ti := textinput.New()
 	ti.CharLimit = danmuLimit(room)
-	ti.Placeholder = "Tab 输入 · Enter 发送"
+	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房"
 
 	return model{
 		danmu:      list.New(),
 		room:       room,
+		roomID:     LiveConfig.RoomID,
+		owner:      newRoomOwner(room),
+		memories:   make(map[uint64]roomMemory),
 		viewport:   viewport.Model{},
 		textInput:  ti,
 		ready:      false,
@@ -74,7 +80,7 @@ func InitialModel(room *api.LiveRoom) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return waitRoom(m.room)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -87,6 +93,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "alt+n":
+			return m.nextRoom()
 		case "tab":
 			if m.state == contentView {
 				m.state = inputView
@@ -97,13 +105,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Blur()
 			}
 		case "enter":
-			if m.state == inputView && !m.sending && strings.TrimSpace(m.textInput.Value()) != "" {
+			if m.state == inputView && !m.sending && !m.switching && strings.TrimSpace(m.textInput.Value()) != "" {
 				m.sending = true
 				m.sendStatus = "发送中"
 				return m, sendDanmu(m.room, m.textInput.Value())
 			}
 			return m, nil
 		}
+	case roomOpened:
+		return m.finishSwitch(msg)
+	case roomEvent:
+		cmds = append(cmds, m.receive(msg))
 	case sendResult:
 		if msg.room != m.room || !m.sending {
 			return m, nil
@@ -136,14 +148,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.textInput.Width = max(1, msg.Width-verticalMarginWidth-3)
 		m.viewport.SetContent(m.renderDanmu())
-	case *danmuMsg:
-		m.danmu.PushBack(msg)
-		for m.danmu.Len() > LiveConfig.ChatBuffer {
-			m.danmu.Remove(m.danmu.Front())
-		}
-		if m.ready {
-			m.viewport.SetContent(m.renderDanmu())
-		}
 	}
 
 	if m.lockBottom {
@@ -185,30 +189,23 @@ func (m model) View() string {
 	return s
 }
 
-func ReceiveMsg(program *tea.Program, room *api.LiveRoom) {
-	for msg := range room.MessageChan {
-		switch msg.Cmd {
-		case "DANMU_MSG": // 普通弹幕消息
-			if danmu := processDanmuMsg(msg); danmu != nil {
-				program.Send(danmu)
-			}
-		case "INTERACT_WORD": // 普通进场消息
-
-		case "ENTRY_EFFECT": // 特效进场消息 和上面的普通进场消息存在其一
-
-		case "PREPARING": // 直播结束，这里断一下日志
-			logging.Rotate()
-		}
-	}
-}
-
-func PoolWindowSize(program *tea.Program) {
+func PoolWindowSize(program *tea.Program, done <-chan struct{}) {
 	if runtime.GOOS != "windows" {
 		return
 	}
 	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
-	for range time.Tick(20 * time.Millisecond) {
-		nowWidth, nowHeight, _ := term.GetSize(int(os.Stdout.Fd()))
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+		nowWidth, nowHeight, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil || nowWidth <= 0 || nowHeight <= 0 {
+			continue
+		}
 		if width != nowWidth || height != nowHeight {
 			width = nowWidth
 			height = nowHeight

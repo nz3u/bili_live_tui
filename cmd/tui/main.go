@@ -19,10 +19,12 @@ func main() {
 	if err != nil || room == nil {
 		logging.Fatalf("Connect server error, err=%v", err)
 	}
-	defer room.Close()
-	p := tea.NewProgram(tui.InitialModel(room), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	go tui.ReceiveMsg(p, room)
-	go tui.PoolWindowSize(p)
+	m := tui.InitialModel(room)
+	defer m.Close()
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	done := make(chan struct{})
+	defer close(done)
+	go tui.PoolWindowSize(p, done)
 	if err := p.Start(); err != nil {
 		logging.Fatalf("Alas, there's been an error: %v", err)
 		os.Exit(1)

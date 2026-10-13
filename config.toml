@@ -1,4 +1,6 @@
 room_id = 7777
+# Alt+N 按顺序切换；默认房间不在列表时自动加入首位。
+room_ids = [7777]
 chat_buffer = 200
 show_room_title = true
 show_room_number = true

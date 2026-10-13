@@ -148,7 +148,7 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		LiveConfig = cfg
 		m.settings = nil
-		m.sendStatus = "设置已保存"
+		statusCmd := m.showStatus("设置已保存")
 		valid := make(map[uint64]bool)
 		for _, id := range configuredRooms(cfg) {
 			valid[id] = true
@@ -165,7 +165,8 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for m.danmu.Len() > cfg.ChatBuffer {
 			m.danmu.Remove(m.danmu.Front())
 		}
-		return m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		next, cmd := m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		return next, tea.Batch(cmd, statusCmd)
 	default:
 		cmd := m.settings.update(key)
 		return m, settingsCommand(m.settings, m.settings.selected, cmd)

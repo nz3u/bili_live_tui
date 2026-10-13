@@ -50,13 +50,15 @@ type model struct {
 	state      sessionState
 	sending    bool
 	sendStatus string
-	width      int
-	height     int
-	roomID     uint64
-	switching  bool
-	owner      *roomOwner
-	memories   map[uint64]roomMemory
-	settings   *settingsModel
+	// statusSeq identifies the status that owns the pending expiry tick.
+	statusSeq int
+	width     int
+	height    int
+	roomID    uint64
+	switching bool
+	owner     *roomOwner
+	memories  map[uint64]roomMemory
+	settings  *settingsModel
 }
 
 func InitialModel(room *api.LiveRoom) model {
@@ -134,6 +136,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case statusExpiredMsg:
+		m.expireStatus(msg)
+		return m, nil
 	case settingsMessage:
 		if m.settings != msg.form || m.settings == nil {
 			return m, nil

@@ -12,7 +12,10 @@ name: Release
 on:
   push:
     tags:
+      # 否定模式必须排在正向匹配之后才会生效：-test* 标签由 release-test.yaml 处理，
+      # 避免两个流水线同时向同一个 Release 覆盖上传 assets
       - 'v*'
+      - '!v*-test*'
   workflow_dispatch:
     inputs:
       tag:

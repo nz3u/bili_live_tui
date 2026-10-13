@@ -103,7 +103,7 @@ func (m model) nextRoom() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	ids := configuredRooms(LiveConfig)
-	if len(ids) < 2 {
+	if len(ids) == 0 || len(ids) == 1 && ids[0] == m.roomID {
 		m.sendStatus = "请在设置中添加直播间"
 		return m, nil
 	}
@@ -116,7 +116,9 @@ func (m model) nextRoom() (tea.Model, tea.Cmd) {
 	}
 	m.switching = true
 	m.sendStatus = fmt.Sprintf("切换到 %d", next)
-	return m, m.owner.connect(m.room.Client, next)
+	client := GetCustomHttpClient()
+	client.Jar = m.room.Client.Jar
+	return m, m.owner.connect(client, next)
 }
 func (m model) finishSwitch(result roomOpened) (tea.Model, tea.Cmd) {
 	m.switching = false

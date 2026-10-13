@@ -58,12 +58,13 @@ type model struct {
 	switching  bool
 	owner      *roomOwner
 	memories   map[uint64]roomMemory
+	settings   *settingsModel
 }
 
 func InitialModel(room *api.LiveRoom) model {
 	ti := textinput.New()
 	ti.CharLimit = danmuLimit(room)
-	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房"
+	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房 · F2 设置"
 
 	return model{
 		danmu:      list.New(),
@@ -90,7 +91,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.settings != nil {
+			return m.settingsKey(msg)
+		}
 		switch msg.String() {
+		case "f2":
+			if m.sending || m.switching {
+				return m, nil
+			}
+			m.settings = newSettings(LiveConfig)
+			return m, nil
 		case "ctrl+c":
 			return m, tea.Quit
 		case "alt+n":
@@ -154,6 +164,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 	}
 
+	if m.settings != nil {
+		return m, tea.Batch(cmds...)
+	}
+
 	// if focus isn't on contentView, only mouse can be capture by viewport
 	if _, msgIsMouse := msg.(tea.MouseMsg); m.state == contentView || msgIsMouse {
 		scrollPercent := m.viewport.ScrollPercent()
@@ -179,7 +193,11 @@ func (m model) View() string {
 		return "\nInitializing..."
 	}
 	var s string
-	contentStr := fmt.Sprintf("%s\n%s\n%s", m.headerView(), m.viewport.View(), m.footerView())
+	content := m.viewport.View()
+	if m.settings != nil {
+		content = m.settings.view(m.viewport.Width, m.viewport.Height)
+	}
+	contentStr := fmt.Sprintf("%s\n%s\n%s", m.headerView(), content, m.footerView())
 	textStr := m.inputLine()
 	if m.state == contentView {
 		s = lipgloss.JoinVertical(lipgloss.Left, focusedStyle.Render(contentStr), unFocusedStyle.Render(textStr))

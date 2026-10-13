@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-	"github.com/BurntSushi/toml"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/shr-go/bili_live_tui/api"
 	"github.com/shr-go/bili_live_tui/internal/live_room"
@@ -17,19 +15,17 @@ var (
 	windowWidth  int
 	windowHeight int
 	LiveConfig   api.BiliLiveConfig
+	loadedConfig *configStore
 )
 
 // LoadConfig is explicit so importing the UI never reads files or exits tests.
 func LoadConfig(path string) error {
 	windowWidth, windowHeight, _ = term.GetSize(int(os.Stdout.Fd()))
-	var cfg api.BiliLiveConfig
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return fmt.Errorf("load config: %w", err)
+	store, cfg, err := openConfigStore(path)
+	if err != nil {
+		return err
 	}
-	if cfg.RoomID == 0 || cfg.ChatBuffer <= 0 {
-		return fmt.Errorf("room_id and chat_buffer must be positive")
-	}
-	LiveConfig = cfg
+	loadedConfig, LiveConfig = store, cfg
 	return nil
 }
 

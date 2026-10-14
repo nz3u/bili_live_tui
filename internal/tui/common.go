@@ -41,8 +41,10 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 func GetCustomHttpClient() (client *http.Client) {
-	// Keep a browser-style UA for API compatibility; it is not a user setting.
-	const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+	ua := LiveConfig.UserAgent
+	if ua == "" {
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+	}
 	transport := &userAgentTransport{
 		ua: ua,
 		rt: http.DefaultTransport,

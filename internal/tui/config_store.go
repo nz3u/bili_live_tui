@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/shr-go/bili_live_tui/api"
@@ -34,6 +35,11 @@ func validateConfig(cfg api.BiliLiveConfig) error {
 	}
 	if cfg.ChatBuffer < 1 || cfg.ChatBuffer > 100000 {
 		return fmt.Errorf("chat_buffer must be between 1 and 100000")
+	}
+	for _, r := range cfg.UserAgent {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return fmt.Errorf("user_agent must not contain newline or control characters")
+		}
 	}
 	return nil
 }
@@ -279,7 +285,7 @@ func rewriteConfig(original []byte, cfg api.BiliLiveConfig) ([]byte, error) {
 				}
 				out.WriteString(statement[:prefixEnd])
 				out.WriteString(value)
-				// Known values are numeric/bool/arrays.
+				// Known values are numeric/bool/arrays or validated single-line UA.
 				// Keep comment text, moving multiline-array comments to adjacent lines.
 				comments := configValueComments(statement[equal+1:])
 				for i, comment := range comments {

@@ -32,12 +32,11 @@ func TestFullViewBounds(t *testing.T) {
 }
 func TestLongFieldsKeepCursorTailVisible(t *testing.T) {
 	m := settingsFixture(t)
-	// The room list is the remaining free-text field that can exceed the width.
-	m.settings.selected = 1
+	m.settings.selected = 9
 	m.settings.fields[0].Blur()
-	m.settings.fields[1].Focus()
-	m.settings.fields[1].SetValue(strings.Repeat("123, ", 25) + "TAIL")
-	m.settings.fields[1].CursorEnd()
+	m.settings.fields[9].Focus()
+	m.settings.fields[9].SetValue(strings.Repeat("a", 100) + "TAIL")
+	m.settings.fields[9].CursorEnd()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 	m = updated.(model)
 	if !strings.Contains(m.settings.view(m.viewport.Width, m.viewport.Height), "TAIL") {

@@ -23,6 +23,8 @@ func main() {
 	defer m.Close()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if err := p.Start(); err != nil {
+		// Fatal exits without running defers; stop audio and room workers first.
+		m.Close()
 		logging.Fatalf("Alas, there's been an error: %v", err)
 		os.Exit(1)
 	}

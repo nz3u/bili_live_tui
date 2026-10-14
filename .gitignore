@@ -10,6 +10,7 @@ temp/
 # release workflow, not tracked in the repository.
 /tui.exe
 *.exe
+/dist/
 
 # Windows file-permission diagnostic backups (local troubleshooting artifacts)
 .acl-recovery/

@@ -91,7 +91,10 @@ func (o *roomOwner) close() {
 		room.Close()
 	}
 }
-func (m model) Close() { m.owner.close() }
+func (m model) Close() {
+	m.audio.close()
+	m.owner.close()
+}
 func waitRoom(room *api.LiveRoom) tea.Cmd {
 	return func() tea.Msg {
 		msg, ok := <-room.MessageChan
@@ -129,6 +132,8 @@ func (m model) finishSwitch(result roomOpened) (tea.Model, tea.Cmd) {
 	m.memories[m.roomID] = roomMemory{m.danmu, m.textInput.Value(), m.viewport.YOffset, m.lockBottom}
 	m.owner.release(m.room)
 	m.room, m.roomID = result.room, result.id
+	m.resetAudioDisplay()
+	m.audio.setRoom(m.room, audioUserAgent())
 	memory, ok := m.memories[result.id]
 	if !ok {
 		memory = roomMemory{messages: list.New(), lockBottom: true}
@@ -172,6 +177,11 @@ func (m *model) receive(event roomEvent) tea.Cmd {
 			}
 		case msg.Cmd == "PREPARING":
 			logging.Rotate()
+			m.resetAudioDisplay()
+			m.audio.setRoom(m.room, audioUserAgent())
+		case msg.Cmd == "LIVE":
+			m.resetAudioDisplay()
+			m.audio.setRoom(m.room, audioUserAgent())
 		}
 	}
 	return waitRoom(m.room)

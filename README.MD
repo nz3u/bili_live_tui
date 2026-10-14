@@ -7,6 +7,7 @@
 - 友好的登录方式
 - 彩色弹幕显示
 - 自适应终端大小
+- 自动播放当前直播间音频，Alt+M 静音/取消静音
 
 # 如何使用
 ## 配置文件
@@ -17,6 +18,25 @@ room_id = 7777 # 默认直播间ID
 room_ids = [7777, 3] # Alt+N 循环切换；默认房间缺席时自动加入首位
 chat_buffer = 200 # 可以回滚多少条弹幕
 ```
+
+## 直播音频
+进入房间后自动播放，Alt+N 成功切房后替换音频；切房失败保留原音频。Alt+M 在弹幕区、输入区和设置界面均可静音/取消静音，不修改草稿，也不暂停直播进度。静音状态在切房及重连时保留，本次启动有效。
+
+播放依赖 [mpv](https://mpv.io/installation/)，不依赖浏览器，也不弹出视频窗口。程序优先查找自身目录及其中的 `mpv` 子目录，再查找 PATH。未安装时在原输入行提示，弹幕功能照常可用；安装后按 Alt+M 或等待自动重试。
+
+- Linux：`sudo apt install mpv`；macOS：`brew install mpv`。
+- Windows：可从 [mpv Windows 构建](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 下载并解压到程序旁的 `mpv` 子目录，或将播放器加入 PATH。当前本机构建的 [播放器](<dist/mpv/mpv.exe>) 已准备好。
+- 部分 Windows 便携构建不带 CA 证书。可从 [curl 的 Mozilla CA 证书包](https://curl.se/docs/caextract.html) 下载证书包，保存在播放器旁，名称如下（本机已放置 [证书包](<dist/mpv/cacert.pem>)）：
+  ```text
+  cacert.pem
+  ```
+  程序会自动使用它，始终保留 HTTPS 证书校验，不通过关闭校验绕过网络问题。
+
+未开播、断流或网络错误会自动重试（一次失败周期后等待 15 秒）；收到开播/下播通知会更新音频连接。音频完整提示（含静音切换、未找到 mpv、连接失败）与保存设置一样只显示 1 秒；正常播放时只显示 `▶`，持续静音或未播放时不显示。提示复用原输入行，不增加常驻行，也不会清除保存/发送提示和草稿。
+
+正常退出会取消请求、终止播放器并清理 IPC；Windows 10+ 在创建播放器时原子加入独立的 kill-on-close Job Object，关闭终端或强制结束主程序时也由系统终止播放器及其子进程，不依赖 Go 的退出清理。不会清理其他程序启动的播放器。
+
+接口采用 `getRoomPlayInfo`，优先低清 AVC/FLV，失败尝试备用 CDN 或 HLS；每次重新获取带时效签名的地址，不写入配置和日志。参考 [Streamlink 的 B 站实现](https://raw.githubusercontent.com/streamlink/streamlink/master/src/streamlink/plugins/bilibili.py) 和 [mpv JSON IPC](https://mpv.io/manual/stable/#json-ipc)。只解码音轨不代表 CDN 只传音频：普通直播流仍可能下载音视频复用数据，带宽取决于平台返回的最低画质。
 
 ## 启动软件
 ### `linux`或`macos`
@@ -37,6 +57,7 @@ PowerShell -Command "& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8};.
 在下方区域则可以输入弹幕按回车发送。发送失败保留草稿，网络结果不明时请先确认是否已经发送，程序不会自动重发。
 
 - `Alt+N`：切换到列表中的下一个直播间，分别保留已收消息及草稿。发送中或切换中暂不重复切换；切换失败保留原房间。离开的房间不会继续收消息。
+- `Alt+M`：静音/取消静音当前音频，不暂停直播；切房时保持静音状态。
 - `F2`：打开设置；`Tab` / `↑↓` 选择字段，布尔选项用空格切换；`Ctrl+S` 保存，`Esc` 取消。
 - `F6`：在主界面用系统默认浏览器打开当前直播间（输入弹幕时也可用，不改变草稿）。切房尚未完成时打开原房间；Linux 需要 `xdg-open` 和桌面浏览器。
 - 快捷键和状态复用原输入行，不增加常驻提示行。
@@ -47,7 +68,25 @@ go test ./... -count=1 -timeout=120s
 go vet ./...
 go build -o dist/bililive.exe ./cmd/tui
 ```
-测试使用本地模拟服务，不登录或发送真实弹幕。真实登录、风控、拔网恢复和 Windows 键盘行为需手工验收。
+默认测试使用本地模拟服务，不登录、播放或发送真实弹幕。音频测试覆盖开播重试、CDN 回退、切房、静音、过期结果和退出清理。真实登录、风控、拔网恢复和 Windows 终端 Alt 键行为需手工验收。
+
+可显式启用真实音频测试（PowerShell；不登录或发送弹幕，启动时静音，短暂验证取消静音后恢复）：
+```powershell
+$env:BILILIVE_AUDIO_LIVE_TEST = '1'
+$env:BILILIVE_MPV = (Resolve-Path .\dist\mpv\mpv.exe).Path
+$env:BILILIVE_TEST_ROOM = '7777' # 必须是正在直播的房间
+go test ./internal/tui -run '^TestMPVLiveAudio$' -v -count=1 -timeout=90s
+Remove-Item Env:BILILIVE_AUDIO_LIVE_TEST, Env:BILILIVE_MPV, Env:BILILIVE_TEST_ROOM
+```
+已在本机真实验证 7777：48 kHz 双声道音频输出，视频解码关闭，静音时进度继续推进，IPC 静音/取消静音均成功。
+
+Windows 下还可用本地静音 WAV 验证真实播放器随父进程退出（无需访问直播接口）：
+```powershell
+$env:BILILIVE_MPV = (Resolve-Path .\dist\mpv\mpv.exe).Path
+go test ./internal/tui -run '^TestAudioWindowsRealMPVParentExit$' -v -count=1 -timeout=120s
+Remove-Item Env:BILILIVE_MPV
+```
+测试分别验证正常退出及强制结束父进程，持有准确的播放器进程句柄检查其已终止，不以 PID 消失或复用作判断。
 
 # 计划实现的功能
 - 显示高能榜

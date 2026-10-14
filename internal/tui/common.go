@@ -40,13 +40,16 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return t.rt.RoundTrip(clone)
 }
 
-func GetCustomHttpClient() (client *http.Client) {
-	ua := LiveConfig.UserAgent
-	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+func audioUserAgent() string {
+	if LiveConfig.UserAgent != "" {
+		return LiveConfig.UserAgent
 	}
+	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+}
+
+func GetCustomHttpClient() (client *http.Client) {
 	transport := &userAgentTransport{
-		ua: ua,
+		ua: audioUserAgent(),
 		rt: http.DefaultTransport,
 	}
 	return &http.Client{

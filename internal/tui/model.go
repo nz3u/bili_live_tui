@@ -51,27 +51,35 @@ type model struct {
 	sending    bool
 	sendStatus string
 	// statusSeq identifies the status that owns the pending expiry tick.
-	statusSeq int
-	width     int
-	height    int
-	roomID    uint64
-	switching bool
-	owner     *roomOwner
-	memories  map[uint64]roomMemory
-	settings  *settingsModel
-	openURL   func(string) error
+	statusSeq         int
+	width             int
+	height            int
+	roomID            uint64
+	switching         bool
+	owner             *roomOwner
+	memories          map[uint64]roomMemory
+	settings          *settingsModel
+	openURL           func(string) error
+	audio             *audioOwner
+	audioMuted        bool
+	audioMuteRevision uint64
+	audioText         string
+	audioPlaying      bool
+	audioNoticeSeq    uint64
+	audioAckRevision  uint64
 }
 
 func InitialModel(room *api.LiveRoom) model {
 	ti := textinput.New()
 	ti.CharLimit = danmuLimit(room)
-	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房 · F2 设置 · F6 打开直播间"
+	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房 · Alt+M 静音 · F2 设置 · F6 打开直播间"
 
 	return model{
 		danmu:      list.New(),
 		room:       room,
 		roomID:     LiveConfig.RoomID,
 		owner:      newRoomOwner(room),
+		audio:      newAudioOwner(),
 		openURL:    openBrowser,
 		memories:   make(map[uint64]roomMemory),
 		viewport:   viewport.Model{},
@@ -83,7 +91,8 @@ func InitialModel(room *api.LiveRoom) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(waitRoom(m.room), pollTerminal())
+	m.audio.start(m.room, audioUserAgent())
+	return tea.Batch(waitRoom(m.room), waitAudio(m.audio), pollTerminal())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -107,6 +116,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.String() == "alt+m" {
+			return m.toggleAudioMute()
+		}
 		if m.settings != nil {
 			return m.settingsKey(msg)
 		}
@@ -140,6 +152,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case audioEvent:
+		cmd := m.receiveAudio(msg)
+		return m, tea.Batch(cmd, waitAudio(m.audio))
+	case audioNoticeExpired:
+		if msg.seq == m.audioNoticeSeq {
+			m.audioText = ""
+		}
+		return m, nil
 	case browserOpened:
 		// A delayed launcher result must not overwrite another room or operation.
 		if msg.room != m.room || m.sending || m.switching || m.settings != nil {

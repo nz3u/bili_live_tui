@@ -54,7 +54,7 @@ mpv_path = 'D:\Apps\mpv'         # 播放器目录
 ```shell
 PowerShell -Command "& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8};.\bililive.exe"
 ```
-本地构建目录附带 `start.bat`；也可在 Windows Terminal 中先执行 `chcp 65001` 再运行 `bililive.exe`。请在包含配置文件的目录中启动。
+Windows 正式及测试发布包均附带 `start.bat`，推荐解压后通过它启动；也可在 Windows Terminal 中先执行 `chcp 65001` 再运行 `bililive.exe`。请在包含配置文件的目录中启动。
 
 ## 登录
 直接扫描二维码即可。

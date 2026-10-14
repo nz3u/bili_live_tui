@@ -11,4 +11,5 @@ type BiliLiveConfig struct {
 	ShowRoomTitle  bool     `toml:"show_room_title"`
 	ShowRoomNumber bool     `toml:"show_room_number"`
 	UserAgent      string   `toml:"user_agent"`
+	MPVPath        string   `toml:"mpv_path"`
 }

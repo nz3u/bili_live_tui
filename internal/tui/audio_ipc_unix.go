@@ -4,9 +4,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -15,6 +17,9 @@ func dialAudioIPC(ctx context.Context, endpoint string) (net.Conn, error) {
 }
 
 func startAudioProcess(ctx context.Context, player string, args []string) (*audioProcess, error) {
+	if !filepath.IsAbs(player) {
+		return nil, fmt.Errorf("mpv executable path must be absolute")
+	}
 	cmd := exec.CommandContext(ctx, player, args...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.WaitDelay = 2 * time.Second

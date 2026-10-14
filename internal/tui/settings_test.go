@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/shr-go/bili_live_tui/api"
 )
 
 func settingsFixture(t *testing.T) model {
@@ -37,13 +39,20 @@ func TestSettingsSaveAndCancel(t *testing.T) {
 	m.settings.fields[2].SetValue("10")
 	m.settings.fields[3].SetValue("true")
 	m.settings.fields[9].SetValue("test-agent")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	target := fakeRoom(3)
+	m.owner.open = func(*http.Client, uint64) (*api.LiveRoom, error) { return target, nil }
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(model)
 	if m.settings != nil || LiveConfig.RoomID != 3 || len(LiveConfig.RoomIDs) != 3 || !LiveConfig.ShowRoomTitle || LiveConfig.UserAgent != "test-agent" {
 		t.Fatalf("save not applied: %+v", LiveConfig)
 	}
-	if m.roomID != 1 || m.textInput.Value() != "原草稿" {
-		t.Fatal("save changed active room or draft")
+	if m.roomID != 1 || m.textInput.Value() != "原草稿" || !m.switching {
+		t.Fatal("save did not preserve current room/draft until the new default connects")
+	}
+	updated, _ = m.Update(savedRoomOpen(t, cmd))
+	m = updated.(model)
+	if m.roomID != 3 || m.switching || m.memories[1].draft != "原草稿" {
+		t.Fatal("new default was not activated or old draft was lost")
 	}
 	_, cfg, err := openConfigStore(loadedConfig.path)
 	if err != nil || cfg.RoomID != 3 {

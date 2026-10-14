@@ -8,7 +8,7 @@ import (
 
 func TestSettingsSavedStatusExpires(t *testing.T) {
 	m := settingsFixture(t)
-	m.settings.fields[0].SetValue("3")
+	m.settings.fields[3].SetValue("true") // Saving display settings should not switch rooms.
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(model)
 	if m.settings != nil {

@@ -49,7 +49,7 @@ func (s *fakeAudioSession) Close()                { s.once.Do(func() { close(s.d
 func fakeAudioOwner(t *testing.T) *audioOwner {
 	t.Helper()
 	o := newAudioOwner()
-	o.find = func() (string, error) { return "fake-player", nil }
+	o.find = func(string, string) (string, error) { return "fake-player", nil }
 	o.resolve = func(ctx context.Context, client *http.Client, id uint64) ([]string, error) {
 		return []string{"https://cdn.example/live"}, nil
 	}
@@ -328,7 +328,7 @@ func TestUIAudioChangesOnlyAfterSuccessfulRoomSwitch(t *testing.T) {
 
 func TestMissingAudioPlayerIsNonfatal(t *testing.T) {
 	o := fakeAudioOwner(t)
-	o.find = func() (string, error) { return "", errors.New("未找到 mpv") }
+	o.find = func(string, string) (string, error) { return "", errors.New("未找到 mpv") }
 	var lookups atomic.Int32
 	o.resolve = func(context.Context, *http.Client, uint64) ([]string, error) { lookups.Add(1); return nil, nil }
 	o.start(fakeRoom(1), "ua")
@@ -380,50 +380,83 @@ func TestAudioReconnectStatusBeforeFallbackReady(t *testing.T) {
 	awaitAudioEvent(t, o, func(e audioEvent) bool { return !e.playing && e.text == "连接中" })
 }
 
-func TestAudioPlayerDiscovery(t *testing.T) {
-	dir, pathDir := t.TempDir(), t.TempDir()
+func TestAudioPlayerConfiguredDirectoryOrFile(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "播放器 with spaces")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	name := "mpv"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	installed := filepath.Join(pathDir, name)
-	if err := os.WriteFile(installed, []byte("stub"), 0755); err != nil {
+	player := filepath.Join(dir, name)
+	if err := os.WriteFile(player, []byte("stub"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", pathDir)
-	path, err := findAudioPlayerIn(dir)
-	if err != nil || path != installed {
-		t.Fatalf("%s %v", path, err)
-	}
-	if err := os.Mkdir(filepath.Join(dir, "mpv"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	portable := filepath.Join(dir, "mpv", name)
-	if err := os.WriteFile(portable, []byte("stub"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	path, err = findAudioPlayerIn(dir)
-	if err != nil || path != portable {
-		t.Fatalf("%s %v", path, err)
+	for _, configured := range []string{dir, player, filepath.Base(dir), filepath.Join(filepath.Base(dir), name)} {
+		got, err := configuredAudioPlayer(configured, base)
+		if err != nil || got != player {
+			t.Fatalf("configured %q: %q %v", configured, got, err)
+		}
 	}
 }
 
-func TestAudioPlayerNonExecutableSiblingDoesNotShadowPATH(t *testing.T) {
+func TestAudioPlayerNeverFallsBackToPATHOrSiblings(t *testing.T) {
+	base := t.TempDir()
+	name := "mpv"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(base, name), []byte("stub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", base)
+	for _, configured := range []string{"", "   ", "missing-player", "./missing-dir"} {
+		if got, err := configuredAudioPlayer(configured, base); err == nil || got != "" {
+			t.Fatalf("implicit fallback for %q: %s", configured, got)
+		}
+	}
+	// A bare filename is a relative config path, not a PATH lookup.
+	if got, err := configuredAudioPlayer(name, t.TempDir()); err == nil || got != "" {
+		t.Fatalf("bare name searched PATH: %s", got)
+	}
+}
+
+func TestAudioPlayerRejectsEmptyDirectoryAndNonRegularTarget(t *testing.T) {
+	base := t.TempDir()
+	if _, err := configuredAudioPlayer(base, base); err == nil {
+		t.Fatal("empty directory accepted")
+	}
+	name := "mpv"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.Mkdir(filepath.Join(base, name), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configuredAudioPlayer(base, base); err == nil {
+		t.Fatal("directory named mpv accepted as executable")
+	}
+}
+
+func TestAudioPlayerRejectsNonExecutableFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix execute permissions")
 	}
-	dir, pathDir := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "mpv"), []byte("stub"), 0644); err != nil {
+	base := t.TempDir()
+	player := filepath.Join(base, "mpv")
+	if err := os.WriteFile(player, []byte("stub"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	installed := filepath.Join(pathDir, "mpv")
-	if err := os.WriteFile(installed, []byte("stub"), 0755); err != nil {
-		t.Fatal(err)
+	if _, err := configuredAudioPlayer(player, base); err == nil {
+		t.Fatal("non-executable file accepted")
 	}
-	t.Setenv("PATH", pathDir)
-	path, err := findAudioPlayerIn(dir)
-	if err != nil || path != installed {
-		t.Fatalf("%s %v", path, err)
+}
+
+func TestAudioProcessRejectsBareNameWithoutPATHLookup(t *testing.T) {
+	if process, err := startAudioProcess(context.Background(), "mpv", nil); err == nil || process != nil {
+		t.Fatal("bare player name accepted")
 	}
 }
 

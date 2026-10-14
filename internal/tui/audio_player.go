@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -21,34 +21,53 @@ type audioSession interface {
 	Close()
 }
 
-func findAudioPlayer() (string, error) {
-	dir := ""
-	if executable, err := os.Executable(); err == nil {
-		dir = filepath.Dir(executable)
+func audioConfigDir() string {
+	if loadedConfig != nil {
+		return filepath.Dir(loadedConfig.path)
 	}
-	return findAudioPlayerIn(dir)
+	return "."
 }
 
-func findAudioPlayerIn(dir string) (string, error) {
-	name := "mpv"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
+func findAudioPlayer() (string, error) {
+	return configuredAudioPlayer(LiveConfig.MPVPath, audioConfigDir())
+}
+
+// Resolve only the explicitly configured location, never PATH or siblings.
+// Relative paths are relative to the config file, not the working directory.
+func configuredAudioPlayer(configured, baseDir string) (string, error) {
+	path := strings.TrimSpace(configured)
+	if path == "" {
+		return "", errors.New("请在设置中填写 mpv_path")
 	}
-	if dir != "" {
-		for _, path := range []string{
-			filepath.Join(dir, name), filepath.Join(dir, "mpv", name),
-		} {
-			// LookPath also checks Unix execute permission; a broken sibling
-			// must not shadow a usable installed player.
-			if executable, err := exec.LookPath(path); err == nil {
-				return executable, nil
-			}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", errors.New("mpv_path 路径无效")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", errors.New("未找到 mpv，请检查 mpv_path")
+	}
+	if info.IsDir() {
+		name := "mpv"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		path = filepath.Join(path, name)
+		info, err = os.Stat(path)
+		if err != nil {
+			return "", errors.New("目录内未找到 mpv，请检查 mpv_path")
 		}
 	}
-	if path, err := exec.LookPath(name); err == nil {
-		return path, nil
+	if !info.Mode().IsRegular() {
+		return "", errors.New("mpv_path 须为播放器目录或可执行文件")
 	}
-	return "", errors.New("未找到 mpv，请安装或放在程序旁")
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0111 == 0 {
+		return "", errors.New("mpv_path 文件没有执行权限")
+	}
+	return path, nil
 }
 
 type audioProcess struct {

@@ -41,6 +41,11 @@ func validateConfig(cfg api.BiliLiveConfig) error {
 			return fmt.Errorf("user_agent must not contain newline or control characters")
 		}
 	}
+	for _, r := range cfg.MPVPath {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return fmt.Errorf("mpv_path must not contain newline or control characters")
+		}
+	}
 	return nil
 }
 

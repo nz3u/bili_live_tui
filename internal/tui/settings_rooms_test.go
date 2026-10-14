@@ -52,7 +52,9 @@ func TestSettingsSaveInsertsMissingDefaultFirst(t *testing.T) {
 			m := settingsFixture(t)
 			m.settings.fields[0].SetValue(tc.defaultID)
 			m.settings.fields[1].SetValue(tc.list)
-			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+			target := fakeRoom(tc.want[0])
+			m.owner.open = func(_ *http.Client, id uint64) (*api.LiveRoom, error) { target.RoomID = id; return target, nil }
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 			m = next.(model)
 			if m.settings != nil || !reflect.DeepEqual(LiveConfig.RoomIDs, tc.want) {
 				t.Fatalf("not normalized: %+v", LiveConfig)
@@ -61,8 +63,23 @@ func TestSettingsSaveInsertsMissingDefaultFirst(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(cfg.RoomIDs, tc.want) {
 				t.Fatalf("not persisted: %+v %v", cfg, err)
 			}
-			if m.switching || m.roomID != 1 {
-				t.Fatal("current room was retained but still switched")
+			if tc.defaultID == "1" {
+				if m.switching || m.roomID != 1 {
+					t.Fatal("unchanged default reconnected")
+				}
+			} else {
+				if !m.switching || m.roomID != 1 {
+					t.Fatal("changed default did not schedule a switch while current room remained listed")
+				}
+				result := savedRoomOpen(t, cmd)
+				if result.id != LiveConfig.RoomID {
+					t.Fatalf("wrong target %d, want %d", result.id, LiveConfig.RoomID)
+				}
+				next, _ = m.Update(result)
+				m = next.(model)
+				if m.switching || m.roomID != LiveConfig.RoomID || m.room != target {
+					t.Fatal("changed default not activated")
+				}
 			}
 		})
 	}
@@ -144,27 +161,64 @@ func TestSettingsDeletingCurrentNonDefaultRoomReturnsToUnchangedDefault(t *testi
 }
 
 func TestSettingsFailedAutoSwitchRetainsRoomDraftAndSavedConfig(t *testing.T) {
-	m := settingsFixture(t)
-	first := m.room
-	m.textInput.SetValue("保留草稿")
-	m.audioPlaying = true
-	m.owner.open = func(*http.Client, uint64) (*api.LiveRoom, error) { return nil, errors.New("offline") }
-	m.settings.fields[0].SetValue("3")
-	m.settings.fields[1].SetValue("2")
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
-	m = next.(model)
-	next, _ = m.Update(savedRoomOpen(t, cmd))
-	m = next.(model)
-	if m.room != first || m.roomID != 1 || m.switching || !m.audioPlaying || m.textInput.Value() != "保留草稿" || !strings.Contains(m.sendStatus, "切换失败") {
-		t.Fatal("failed auto-switch changed active state")
+	for _, retained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("current-retained=%v", retained), func(t *testing.T) {
+			m := settingsFixture(t)
+			first := m.room
+			m.textInput.SetValue("保留草稿")
+			m.audioPlaying = true
+			m.owner.open = func(*http.Client, uint64) (*api.LiveRoom, error) { return nil, errors.New("offline") }
+			m.settings.fields[0].SetValue("3")
+			m.settings.fields[1].SetValue("2")
+			want := []uint64{3, 2}
+			if retained {
+				m.settings.fields[1].SetValue("1, 2")
+				want = []uint64{3, 1, 2}
+			}
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+			m = next.(model)
+			if !m.switching {
+				t.Fatal("changed default did not schedule connection")
+			}
+			next, _ = m.Update(savedRoomOpen(t, cmd))
+			m = next.(model)
+			if m.room != first || m.roomID != 1 || m.switching || !m.audioPlaying || m.textInput.Value() != "保留草稿" || !strings.Contains(m.sendStatus, "切换失败") {
+				t.Fatal("failed auto-switch changed active state")
+			}
+			_, cfg, err := openConfigStore(loadedConfig.path)
+			if err != nil || cfg.RoomID != 3 || LiveConfig.RoomID != 3 || !reflect.DeepEqual(cfg.RoomIDs, want) {
+				t.Fatal("failed connection rolled back a successful config save")
+			}
+			select {
+			case <-first.DoneChan:
+				t.Fatal("old room closed on failure")
+			default:
+			}
+		})
 	}
-	if LiveConfig.RoomID != 3 || !reflect.DeepEqual(LiveConfig.RoomIDs, []uint64{3, 2}) {
-		t.Fatal("failed connection rolled back a successful config save")
-	}
-	select {
-	case <-first.DoneChan:
-		t.Fatal("old room closed on failure")
-	default:
+}
+
+func TestSettingsDefaultUnchangedOrAlreadyActiveDoesNotReconnect(t *testing.T) {
+	for _, defaultID := range []string{"1", "2"} {
+		t.Run("default="+defaultID, func(t *testing.T) {
+			m := settingsFixture(t)
+			m.settings = nil
+			room2 := fakeRoom(2)
+			m.owner.open = func(*http.Client, uint64) (*api.LiveRoom, error) { return room2, nil }
+			next, cmd := m.nextRoom()
+			m = next.(model)
+			next, _ = m.Update(cmd())
+			m = next.(model)
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyF2})
+			m = next.(model)
+			m.settings.fields[0].SetValue(defaultID)
+			m.settings.fields[2].SetValue("10")
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+			m = next.(model)
+			if m.settings != nil || m.switching || m.room != room2 || m.roomID != 2 || m.sendStatus != "设置已保存" {
+				t.Fatal("unchanged default or already-active default caused reconnect")
+			}
+		})
 	}
 }
 

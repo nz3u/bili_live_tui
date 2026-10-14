@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os/exec"
+	"path/filepath"
 	"sync"
 	"unsafe"
 
@@ -26,9 +26,8 @@ func startAudioProcess(ctx context.Context, player string, args []string) (*audi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	player, err := exec.LookPath(player)
-	if err != nil {
-		return nil, err
+	if !filepath.IsAbs(player) {
+		return nil, fmt.Errorf("mpv executable path must be absolute")
 	}
 	application, err := windows.UTF16PtrFromString(player)
 	if err != nil {

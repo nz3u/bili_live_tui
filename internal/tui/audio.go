@@ -37,7 +37,7 @@ type audioOwner struct {
 	cancel       context.CancelFunc
 	controls     chan struct{}
 	events       chan audioEvent
-	find         func() (string, error)
+	find         func(string, string) (string, error)
 	resolve      func(context.Context, *http.Client, uint64) ([]string, error)
 	launch       func(context.Context, string, string, string, bool) (audioSession, error)
 	retryDelay   time.Duration
@@ -45,7 +45,7 @@ type audioOwner struct {
 
 func newAudioOwner() *audioOwner {
 	return &audioOwner{
-		events: make(chan audioEvent, 8), find: findAudioPlayer,
+		events: make(chan audioEvent, 8), find: configuredAudioPlayer,
 		resolve: live_room.AudioStreams, launch: launchMPV, retryDelay: audioRetryDelay,
 	}
 }
@@ -60,6 +60,9 @@ func (o *audioOwner) start(room *api.LiveRoom, ua string) {
 	o.setRoom(room, ua)
 }
 func (o *audioOwner) setRoom(room *api.LiveRoom, ua string) {
+	// Snapshot UI-owned config before starting the worker; retry never reads
+	// LiveConfig/loadedConfig while settings are being saved.
+	playerPath, baseDir := LiveConfig.MPVPath, audioConfigDir()
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if !o.started || o.closed {
@@ -80,7 +83,7 @@ func (o *audioOwner) setRoom(room *api.LiveRoom, ua string) {
 		o.playMu.Lock()
 		defer o.playMu.Unlock()
 		if ctx.Err() == nil {
-			o.run(ctx, room, ua, generation, controls)
+			o.run(ctx, room, ua, playerPath, baseDir, generation, controls)
 		}
 	}()
 }
@@ -137,10 +140,10 @@ func (o *audioOwner) publish(event audioEvent) {
 	default:
 	}
 }
-func (o *audioOwner) run(ctx context.Context, room *api.LiveRoom, ua string, generation uint64, controls <-chan struct{}) {
+func (o *audioOwner) run(ctx context.Context, room *api.LiveRoom, ua, playerPath, baseDir string, generation uint64, controls <-chan struct{}) {
 	report := func(text string) { o.publish(audioEvent{room: room, generation: generation, text: text}) }
 	for ctx.Err() == nil {
-		player, err := o.find()
+		player, err := o.find(playerPath, baseDir)
 		if err != nil {
 			report(err.Error())
 		} else {

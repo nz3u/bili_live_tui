@@ -9,3 +9,6 @@ show_ship_level = true
 show_medal_name = true
 show_medal_level = true
 # user_agent = ""
+# mpv 目录或可执行文件完整路径；相对路径以此配置文件目录为基准，不查找 PATH。
+# Windows 路径使用单引号，例如 'D:\Apps\mpv' 或 'D:\Apps\mpv\mpv.exe'。
+mpv_path = ""

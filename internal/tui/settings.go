@@ -12,7 +12,7 @@ import (
 	"github.com/shr-go/bili_live_tui/api"
 )
 
-var settingLabels = []string{"默认直播间", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级", "User-Agent（下次连接）"}
+var settingLabels = []string{"默认直播间", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级", "User-Agent（下次连接）", "mpv 目录或可执行文件"}
 
 type settingsModel struct {
 	fields    []textinput.Model
@@ -25,7 +25,7 @@ func newSettings(cfg api.BiliLiveConfig) *settingsModel {
 	for i, id := range cfg.RoomIDs {
 		ids[i] = strconv.FormatUint(id, 10)
 	}
-	values := []string{strconv.FormatUint(cfg.RoomID, 10), strings.Join(ids, ", "), strconv.Itoa(cfg.ChatBuffer), strconv.FormatBool(cfg.ShowRoomTitle), strconv.FormatBool(cfg.ShowRoomNumber), strconv.FormatBool(cfg.ColorMode), strconv.FormatBool(cfg.ShowShipLevel), strconv.FormatBool(cfg.ShowMedalName), strconv.FormatBool(cfg.ShowMedalLevel), cfg.UserAgent}
+	values := []string{strconv.FormatUint(cfg.RoomID, 10), strings.Join(ids, ", "), strconv.Itoa(cfg.ChatBuffer), strconv.FormatBool(cfg.ShowRoomTitle), strconv.FormatBool(cfg.ShowRoomNumber), strconv.FormatBool(cfg.ColorMode), strconv.FormatBool(cfg.ShowShipLevel), strconv.FormatBool(cfg.ShowMedalName), strconv.FormatBool(cfg.ShowMedalLevel), cfg.UserAgent, cfg.MPVPath}
 	s := &settingsModel{fields: make([]textinput.Model, len(values))}
 	for i, value := range values {
 		s.fields[i] = textinput.New()
@@ -64,6 +64,7 @@ func (s *settingsModel) config() (api.BiliLiveConfig, error) {
 		*flag = s.fields[i+3].Value() == "true"
 	}
 	cfg.UserAgent = s.fields[9].Value()
+	cfg.MPVPath = strings.TrimSpace(s.fields[10].Value())
 	// Validate first: normalization must not hide duplicate/invalid user IDs.
 	if err := validateConfig(cfg); err != nil {
 		return cfg, err
@@ -151,8 +152,14 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settings.errorText = singleLine(err.Error())
 			return m, nil
 		}
+		defaultChanged := LiveConfig.RoomID != cfg.RoomID
+		playerChanged := LiveConfig.MPVPath != cfg.MPVPath
 		LiveConfig = cfg
 		m.settings = nil
+		if playerChanged {
+			m.resetAudioDisplay()
+			m.audio.setRoom(m.room, audioUserAgent())
+		}
 		statusCmd := m.showStatus("设置已保存")
 		valid := make(map[uint64]bool)
 		for _, id := range configuredRooms(cfg) {
@@ -173,7 +180,7 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next, cmd := m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 		m = next.(model)
 		var switchCmd tea.Cmd
-		if !valid[m.roomID] {
+		if defaultChanged || !valid[m.roomID] {
 			next, switchCmd = m.switchRoom(cfg.RoomID)
 			m = next.(model)
 		}

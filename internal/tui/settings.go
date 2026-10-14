@@ -12,7 +12,7 @@ import (
 	"github.com/shr-go/bili_live_tui/api"
 )
 
-var settingLabels = []string{"默认直播间（下次启动）", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级", "User-Agent（下次连接）"}
+var settingLabels = []string{"默认直播间（下次启动）", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级"}
 
 type settingsModel struct {
 	fields    []textinput.Model
@@ -25,7 +25,7 @@ func newSettings(cfg api.BiliLiveConfig) *settingsModel {
 	for i, id := range cfg.RoomIDs {
 		ids[i] = strconv.FormatUint(id, 10)
 	}
-	values := []string{strconv.FormatUint(cfg.RoomID, 10), strings.Join(ids, ", "), strconv.Itoa(cfg.ChatBuffer), strconv.FormatBool(cfg.ShowRoomTitle), strconv.FormatBool(cfg.ShowRoomNumber), strconv.FormatBool(cfg.ColorMode), strconv.FormatBool(cfg.ShowShipLevel), strconv.FormatBool(cfg.ShowMedalName), strconv.FormatBool(cfg.ShowMedalLevel), cfg.UserAgent}
+	values := []string{strconv.FormatUint(cfg.RoomID, 10), strings.Join(ids, ", "), strconv.Itoa(cfg.ChatBuffer), strconv.FormatBool(cfg.ShowRoomTitle), strconv.FormatBool(cfg.ShowRoomNumber), strconv.FormatBool(cfg.ColorMode), strconv.FormatBool(cfg.ShowShipLevel), strconv.FormatBool(cfg.ShowMedalName), strconv.FormatBool(cfg.ShowMedalLevel)}
 	s := &settingsModel{fields: make([]textinput.Model, len(values))}
 	for i, value := range values {
 		s.fields[i] = textinput.New()
@@ -63,7 +63,6 @@ func (s *settingsModel) config() (api.BiliLiveConfig, error) {
 	for i, flag := range flags {
 		*flag = s.fields[i+3].Value() == "true"
 	}
-	cfg.UserAgent = s.fields[9].Value()
 	return cfg, validateConfig(cfg)
 }
 func isBooleanSetting(index int) bool { return index >= 3 && index <= 8 }

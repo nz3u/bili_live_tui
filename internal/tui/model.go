@@ -59,18 +59,20 @@ type model struct {
 	owner     *roomOwner
 	memories  map[uint64]roomMemory
 	settings  *settingsModel
+	openURL   func(string) error
 }
 
 func InitialModel(room *api.LiveRoom) model {
 	ti := textinput.New()
 	ti.CharLimit = danmuLimit(room)
-	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房 · F2 设置"
+	ti.Placeholder = "Tab 输入 · Enter 发送 · Alt+N 切房 · F2 设置 · F6 打开直播间"
 
 	return model{
 		danmu:      list.New(),
 		room:       room,
 		roomID:     LiveConfig.RoomID,
 		owner:      newRoomOwner(room),
+		openURL:    openBrowser,
 		memories:   make(map[uint64]roomMemory),
 		viewport:   viewport.Model{},
 		textInput:  ti,
@@ -119,6 +121,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "alt+n":
 			return m.nextRoom()
+		case "f6":
+			return m.openCurrentRoom()
 		case "tab":
 			if m.state == contentView {
 				m.state = inputView
@@ -136,6 +140,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case browserOpened:
+		// A delayed launcher result must not overwrite another room or operation.
+		if msg.room != m.room || m.sending || m.switching || m.settings != nil {
+			return m, nil
+		}
+		if msg.err != nil {
+			cmd = m.showStatus("打开直播间失败：" + singleLine(msg.err.Error()))
+		} else {
+			cmd = m.showStatus("已请求浏览器打开直播间")
+		}
+		return m, cmd
 	case statusExpiredMsg:
 		m.expireStatus(msg)
 		return m, nil

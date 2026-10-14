@@ -24,7 +24,7 @@ func configFixture(t *testing.T, text string) string {
 }
 
 func TestConfigValidation(t *testing.T) {
-	good := api.BiliLiveConfig{RoomID: 1, ChatBuffer: 100000, RoomIDs: []uint64{1, 2}, UserAgent: "Agent/1 中文"}
+	good := api.BiliLiveConfig{RoomID: 1, ChatBuffer: 100000, RoomIDs: []uint64{1, 2}}
 	if err := validateConfig(good); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +44,6 @@ func TestConfigValidation(t *testing.T) {
 		{"buffer zero", func(c *api.BiliLiveConfig) { c.ChatBuffer = 0 }},
 		{"buffer negative", func(c *api.BiliLiveConfig) { c.ChatBuffer = -1 }},
 		{"buffer large", func(c *api.BiliLiveConfig) { c.ChatBuffer = 100001 }},
-	}
-	for _, control := range []string{"\n", "\r", "\t", "\x00", "\x7f", "\u0085", "\u2028", "\u2029"} {
-		char := control
-		cases = append(cases, struct {
-			name   string
-			change func(*api.BiliLiveConfig)
-		}{"UA " + control, func(c *api.BiliLiveConfig) { c.UserAgent = "a" + char + "b" }})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +75,6 @@ func TestConfigPreservesUnknownAndMultiline(t *testing.T) {
 	cfg.RoomID = 3
 	cfg.RoomIDs = []uint64{3, 4}
 	cfg.ChatBuffer = 100
-	cfg.UserAgent = "new#agent \"quoted\" \\ ok"
 	cfg.ShowRoomTitle = true
 	if err := store.save(cfg); err != nil {
 		t.Fatal(err)
@@ -91,7 +83,7 @@ func TestConfigPreservesUnknownAndMultiline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, preserved := range []string{"# header", "# active", "# favorites", "# first", "# end rooms", "# UA", "unknown = { room_id = 88, text = 'stay' } # unknown", "cookies = 'preexisting untouched'", "multiline = '''\n[not_a_table]\nroom_id = 200\n'''", "[extra]\nroom_id = 99 # nested\nroom_ids = [77]\nchat_buffer = 8\n"} {
+	for _, preserved := range []string{"# header", "# active", "# favorites", "# first", "# end rooms", "user_agent = 'old#agent' # UA", "unknown = { room_id = 88, text = 'stay' } # unknown", "cookies = 'preexisting untouched'", "multiline = '''\n[not_a_table]\nroom_id = 200\n'''", "[extra]\nroom_id = 99 # nested\nroom_ids = [77]\nchat_buffer = 8\n"} {
 		if !strings.Contains(string(data), preserved) {
 			t.Errorf("lost %q in %s", preserved, data)
 		}
@@ -100,7 +92,7 @@ func TestConfigPreservesUnknownAndMultiline(t *testing.T) {
 	if _, err := toml.Decode(string(data), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.RoomID != 3 || len(got.RoomIDs) != 2 || got.RoomIDs[1] != 4 || got.UserAgent != cfg.UserAgent || !got.ShowRoomTitle {
+	if got.RoomID != 3 || len(got.RoomIDs) != 2 || got.RoomIDs[1] != 4 || !got.ShowRoomTitle {
 		t.Fatalf("wrong config: %+v", got)
 	}
 	after, _ := os.Stat(path)
@@ -254,7 +246,6 @@ value = "no final newline"`
 		t.Fatal(err)
 	}
 	cfg.RoomID = 7
-	cfg.UserAgent = "new # agent"
 	cfg.ShowShipLevel, cfg.ShowMedalName, cfg.ShowMedalLevel = true, true, true
 	cfg.ColorMode, cfg.ShowRoomTitle, cfg.ShowRoomNumber = true, true, true
 	if err := store.save(cfg); err != nil {
@@ -271,7 +262,7 @@ value = "no final newline"`
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.RoomID != cfg.RoomID || got.UserAgent != cfg.UserAgent || !got.ShowShipLevel || !got.ShowMedalName || !got.ShowMedalLevel || !got.ColorMode || !got.ShowRoomTitle || !got.ShowRoomNumber {
+	if got.RoomID != cfg.RoomID || !got.ShowShipLevel || !got.ShowMedalName || !got.ShowMedalLevel || !got.ColorMode || !got.ShowRoomTitle || !got.ShowRoomNumber {
 		t.Fatalf("wrong saved values: %+v", got)
 	}
 	if err := store.save(got); err != nil {

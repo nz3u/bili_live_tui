@@ -36,10 +36,12 @@ func TestSettingsSaveAndCancel(t *testing.T) {
 	m.settings.fields[1].SetValue("3, 4")
 	m.settings.fields[2].SetValue("10")
 	m.settings.fields[3].SetValue("true")
-	m.settings.fields[9].SetValue("test-agent")
+	if len(m.settings.fields) != 9 || len(settingLabels) != 9 {
+		t.Fatal("unexpected settings fields")
+	}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(model)
-	if m.settings != nil || LiveConfig.RoomID != 3 || len(LiveConfig.RoomIDs) != 2 || !LiveConfig.ShowRoomTitle || LiveConfig.UserAgent != "test-agent" {
+	if m.settings != nil || LiveConfig.RoomID != 3 || len(LiveConfig.RoomIDs) != 2 || !LiveConfig.ShowRoomTitle {
 		t.Fatalf("save not applied: %+v", LiveConfig)
 	}
 	if m.roomID != 1 || m.textInput.Value() != "原草稿" {
@@ -119,7 +121,7 @@ func TestSettingsKeysAndNoExtraRows(t *testing.T) {
 		m = updated.(model)
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyF2})
 		m = updated.(model)
-		m.settings.selected = 9
+		m.settings.selected = len(m.settings.fields) - 1
 		view := m.settings.view(m.viewport.Width, m.viewport.Height)
 		if m.viewport.Height > 0 && lipgloss.Height(view) > m.viewport.Height {
 			t.Fatal("form exceeds viewport")

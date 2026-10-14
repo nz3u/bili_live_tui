@@ -11,7 +11,7 @@
 
 # 如何使用
 ## 配置文件
-按 F2 在程序内编辑配置，Ctrl+S 保存，Esc 取消。支持默认直播间、直播间列表、缓存条数、显示选项和 User-Agent。默认直播间下次启动生效，列表和显示选项保存后生效，User-Agent 下次连接生效。
+按 F2 在程序内编辑配置，Ctrl+S 保存，Esc 取消。支持默认直播间、直播间列表、缓存条数、显示选项和 User-Agent。保存时默认直播间若不在列表中，自动加入首位并写入配置；已在列表中则保留原顺序。当前直播间若被移出保存后的列表，退出设置后自动连接默认房间，连接成功才切换弹幕和音频；失败保留原房间、草稿及音频并显示切换失败，已经保存的配置不回滚。当前房间仍在列表时不会因修改默认房间而立即切房。列表和显示选项保存后生效，User-Agent 下次连接生效。
 保存保留未知配置和注释；如果文件被外部修改，会拒绝覆盖，请重启后再修改。
 ```toml
 room_id = 7777 # 默认直播间ID
@@ -22,7 +22,7 @@ chat_buffer = 200 # 可以回滚多少条弹幕
 ## 直播音频
 进入房间后自动播放，Alt+N 成功切房后替换音频；切房失败保留原音频。Alt+M 在弹幕区、输入区和设置界面均可静音/取消静音，不修改草稿，也不暂停直播进度。静音状态在切房及重连时保留，本次启动有效。
 
-播放依赖 [mpv](https://mpv.io/installation/)，不依赖浏览器，也不弹出视频窗口。程序优先查找自身目录及其中的 `mpv` 子目录，再查找 PATH。未安装时在原输入行提示，弹幕功能照常可用；安装后按 Alt+M 或等待自动重试。
+播放依赖 [mpv](https://mpv.io/installation/)，后台调用独立的本地播放器，不内嵌 mpv/FFmpeg，不依赖浏览器，也不弹出视频窗口。程序优先查找自身目录及其中的 `mpv` 子目录，再查找 PATH。已有本机 mpv 时，只需把它所在目录加入 PATH，无需随主程序携带便携播放器目录；正式及测试发布包均未打包 mpv，本机测试用播放器不是主程序的一部分。未安装时在原输入行提示，弹幕功能照常可用；安装后按 Alt+M 或等待自动重试。
 
 - Linux：`sudo apt install mpv`；macOS：`brew install mpv`。
 - Windows：可从 [mpv Windows 构建](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 下载并解压到程序旁的 `mpv` 子目录，或将播放器加入 PATH。当前本机构建的 [播放器](<dist/mpv/mpv.exe>) 已准备好。
@@ -67,6 +67,10 @@ PowerShell -Command "& {[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8};.
 go test ./... -count=1 -timeout=120s
 go vet ./...
 go build -o dist/bililive.exe ./cmd/tui
+```
+需要更小的主程序时，可以去掉调试符号（无需更改播放器调用方式）：
+```shell
+go build -trimpath -ldflags="-s -w" -o dist/bililive.exe ./cmd/tui
 ```
 默认测试使用本地模拟服务，不登录、播放或发送真实弹幕。音频测试覆盖开播重试、CDN 回退、切房、静音、过期结果和退出清理。真实登录、风控、拔网恢复和 Windows 终端 Alt 键行为需手工验收。
 

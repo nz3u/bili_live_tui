@@ -33,13 +33,13 @@ func TestSettingsSaveAndCancel(t *testing.T) {
 	m := settingsFixture(t)
 	m.textInput.SetValue("原草稿")
 	m.settings.fields[0].SetValue("3")
-	m.settings.fields[1].SetValue("3, 4")
+	m.settings.fields[1].SetValue("1, 3, 4")
 	m.settings.fields[2].SetValue("10")
 	m.settings.fields[3].SetValue("true")
 	m.settings.fields[9].SetValue("test-agent")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(model)
-	if m.settings != nil || LiveConfig.RoomID != 3 || len(LiveConfig.RoomIDs) != 2 || !LiveConfig.ShowRoomTitle || LiveConfig.UserAgent != "test-agent" {
+	if m.settings != nil || LiveConfig.RoomID != 3 || len(LiveConfig.RoomIDs) != 3 || !LiveConfig.ShowRoomTitle || LiveConfig.UserAgent != "test-agent" {
 		t.Fatalf("save not applied: %+v", LiveConfig)
 	}
 	if m.roomID != 1 || m.textInput.Value() != "原草稿" {

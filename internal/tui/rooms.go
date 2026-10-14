@@ -117,11 +117,20 @@ func (m model) nextRoom() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
+	return m.switchRoom(next)
+}
+
+// Used by both Alt+N and settings reconciliation. The active room/audio stay
+// untouched until the candidate connection succeeds.
+func (m model) switchRoom(id uint64) (tea.Model, tea.Cmd) {
+	if m.switching || m.sending || id == 0 || id == m.roomID {
+		return m, nil
+	}
 	m.switching = true
-	m.sendStatus = fmt.Sprintf("切换到 %d", next)
+	m.sendStatus = fmt.Sprintf("切换到 %d", id)
 	client := GetCustomHttpClient()
 	client.Jar = m.room.Client.Jar
-	return m, m.owner.connect(client, next)
+	return m, m.owner.connect(client, id)
 }
 func (m model) finishSwitch(result roomOpened) (tea.Model, tea.Cmd) {
 	m.switching = false

@@ -12,7 +12,7 @@ import (
 	"github.com/shr-go/bili_live_tui/api"
 )
 
-var settingLabels = []string{"默认直播间（下次启动）", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级", "User-Agent（下次连接）"}
+var settingLabels = []string{"默认直播间", "直播间列表（逗号分隔）", "弹幕缓存条数", "显示房间标题", "显示房间号", "彩色显示", "显示舰长等级", "显示勋章名称", "显示勋章等级", "User-Agent（下次连接）"}
 
 type settingsModel struct {
 	fields    []textinput.Model
@@ -64,7 +64,12 @@ func (s *settingsModel) config() (api.BiliLiveConfig, error) {
 		*flag = s.fields[i+3].Value() == "true"
 	}
 	cfg.UserAgent = s.fields[9].Value()
-	return cfg, validateConfig(cfg)
+	// Validate first: normalization must not hide duplicate/invalid user IDs.
+	if err := validateConfig(cfg); err != nil {
+		return cfg, err
+	}
+	cfg.RoomIDs = configuredRooms(cfg) // Insert a missing default at the front.
+	return cfg, validateConfig(cfg)    // The inserted default also counts toward the limit.
 }
 func isBooleanSetting(index int) bool { return index >= 3 && index <= 8 }
 func (s *settingsModel) update(key tea.KeyMsg) tea.Cmd {
@@ -166,7 +171,13 @@ func (m model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.danmu.Remove(m.danmu.Front())
 		}
 		next, cmd := m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
-		return next, tea.Batch(cmd, statusCmd)
+		m = next.(model)
+		var switchCmd tea.Cmd
+		if !valid[m.roomID] {
+			next, switchCmd = m.switchRoom(cfg.RoomID)
+			m = next.(model)
+		}
+		return m, tea.Batch(cmd, statusCmd, switchCmd)
 	default:
 		cmd := m.settings.update(key)
 		return m, settingsCommand(m.settings, m.settings.selected, cmd)
